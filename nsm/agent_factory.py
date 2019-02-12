@@ -18,7 +18,25 @@ from nsm import nn_util, data_utils
 from nsm.embedding import EmbeddingModel, Embedder
 from nsm.env_factory import Observation, Trajectory, Environment, QAProgrammingEnv
 
-Sample = collections.namedtuple('Sample', ['trajectory', 'prob'])
+# Sample = collections.namedtuple('Sample', ['trajectory', 'prob'])
+
+
+class Sample(object):
+    def __init__(self, trajectory: Trajectory, prob: Union[float, torch.Tensor]):
+        self.trajectory = trajectory
+        self.prob = prob
+
+    def to(self, device: torch.device):
+        for ob in self.trajectory.observations:
+            ob.to(device)
+
+        return self
+
+    def __repr__(self):
+        return 'Sample(%s, prob=%f)'.format(self.trajectory, self.prob)
+
+    __str__ = __repr__
+
 
 Hypothesis = collections.namedtuple('Hypothesis', ['env', 'score'])
 
@@ -145,7 +163,7 @@ class Encoder(nn.Module):
         # (batch_size, question_len, question_feat_len)
         question_feat = env_contexts['question_features']
 
-        # (batch_size, question_len, question_feat_len)
+        # (batch_size, question_len, embed_size + question_feat_len)
         encoder_input = torch.cat([question_embedding, question_feat], dim=-1)
 
         # (batch_size, question_len)
@@ -225,7 +243,7 @@ class MultiLayerDropoutLSTMCell(RNNCellBase):
         o_i = None
         state = []
         for i in range(self.num_layers):
-            h_i, c_i = self.cell_list[0](x, s_tm1[0])
+            h_i, c_i = self.cell_list[i](x, s_tm1[i])
 
             if i > 0 and self.use_skip_connection:
                 o_i = h_i + x
@@ -265,9 +283,13 @@ class Decoder(nn.Module):
         # (builtin_func_num, embed_size)
         self.builtin_func_embeddings = nn.Embedding(builtin_func_num, mem_item_embed_size)
 
-        self.output_feature_linear = nn.Linear(output_feature_num, 1)
+        self.output_feature_linear = nn.Linear(output_feature_num, 1, bias=False)
 
         self.dropout = nn.Dropout(dropout)
+
+    @property
+    def device(self):
+        return self.decoder_cell_init_linear.weight.device
 
     def get_initial_state(self, context_encoding):
         # prepare decoder's initial memory and internal LSTM state
@@ -303,14 +325,14 @@ class Decoder(nn.Module):
         # (batch_size, builtin_func_num, embed_size)
         builtin_func_embedding = self.builtin_func_embeddings.weight.unsqueeze(0).expand(batch_size, -1, -1)
         # (batch_size, builtin_func_num + mem_size, embed_size)
-        initial_memory = torch.cat([builtin_func_embedding, constant_embedding], dim=1)[:, :self.memory_size, ]
+        initial_memory = torch.cat([builtin_func_embedding, constant_embedding], dim=1)[:, :self.memory_size]
 
         encoder_last_states = context_encoding['encoder_last_states']
         decoder_init_states = []
         for i in range(len(encoder_last_states)):
             h_0_i, c_0_i = encoder_last_states[i]
-            sh_0_i = self.decoder_cell_init_linear(c_0_i)
-            sc_0_i = torch.tanh(sh_0_i)
+            sc_0_i = self.decoder_cell_init_linear(c_0_i)
+            sh_0_i = torch.tanh(sc_0_i)
             decoder_init_states.append((sh_0_i, sc_0_i))
 
         state = DecoderState(state=decoder_init_states, memory=initial_memory)
@@ -444,8 +466,14 @@ class PGAgent(nn.Module):
 
         # moved to device
         batched_observation_seq.to(self.device)
-        for val in tgt_actions_info.values(): val.to(self.device)
+        # for val in tgt_actions_info.values(): val.to(self.device)
         # batched_observation_seq = Observation.to_batched_sequence_input(obs_seq, memory_size=self.memory_size)
+
+        # tgt_action_id (batch_size, max_action_len)
+        # tgt_action_mask (batch_size, max_action_len)
+        tgt_action_id, tgt_action_mask = tgt_actions_info['tgt_action_ids'], tgt_actions_info['tgt_action_mask']
+        tgt_action_id = tgt_action_id.to(self.device)
+        tgt_action_mask = tgt_action_mask.to(self.device)
 
         max_time_step = batched_observation_seq.read_ind.size(1)
         action_logits = []
@@ -463,10 +491,6 @@ class PGAgent(nn.Module):
 
         # (batch_size, max_action_len, memory_size)
         action_log_probs = nn_util.masked_log_softmax(action_logits, batched_observation_seq.valid_action_mask)
-
-        # tgt_action_id (batch_size, max_action_len)
-        # tgt_action_mask (batch_size, max_action_len)
-        tgt_action_id, tgt_action_mask = tgt_actions_info['tgt_action_ids'], tgt_actions_info['tgt_action_mask']
 
         # (batch_size, max_action_len)
         tgt_action_log_probs = torch.gather(action_log_probs, dim=-1, index=tgt_action_id.unsqueeze(-1)).squeeze(-1) * tgt_action_mask
@@ -514,7 +538,7 @@ class PGAgent(nn.Module):
 
         active_env_ids = set(range(len(environments)))
         while True:
-            batched_ob_tm1 = Observation.to_batched_input(observations_tm1, memory_size=self.memory_size)
+            batched_ob_tm1 = Observation.to_batched_input(observations_tm1, memory_size=self.memory_size).to(self.device)
             mem_logits, state_t = self.decoder.step(observations_tm1, state_tm1, context_encoding=context_encoding)
 
             # (batch_size)
@@ -597,7 +621,7 @@ class PGAgent(nn.Module):
 
         while beams:
             live_beam_num = len(beams)
-            batched_ob_tm1 = Observation.to_batched_input(observations_tm1, memory_size=self.memory_size)
+            batched_ob_tm1 = Observation.to_batched_input(observations_tm1, memory_size=self.memory_size).to(self.device)
 
             # (live_beam_num * max_live_hyp_num, memory_size)
             # (live_beam_num * max_live_hyp_num, ...)
@@ -607,7 +631,7 @@ class PGAgent(nn.Module):
 
             new_hyp_scores = action_probs_t + hyp_scores_tm1.unsqueeze(-1)
             # (live_beam_num, sorted_cand_list_size)
-            sorted_cand_list_size = beam_size * 2
+            sorted_cand_list_size = max_live_hyp_num * 2
             top_cand_hyp_scores, top_cand_hyp_pos = torch.topk(new_hyp_scores.view(live_beam_num, -1), k=sorted_cand_list_size, dim=-1)   # have some buffer since not all valid actions will execute without error
 
             # (live_beam_num, sorted_cand_list_size)
@@ -736,8 +760,8 @@ class PGAgent(nn.Module):
         torch.save(params, model_path)
 
     @staticmethod
-    def load(model_path, use_cuda=False, **kwargs):
-        device = torch.device("cuda:0" if use_cuda else "cpu")
+    def load(model_path, gpu_id=-1, **kwargs):
+        device = torch.device("cuda:%d" % gpu_id if gpu_id >= 0 else "cpu")
         params = torch.load(model_path, map_location=lambda storage, loc: storage)
         config = params['config']
         config.update(kwargs)

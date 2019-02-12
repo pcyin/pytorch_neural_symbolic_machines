@@ -1,11 +1,26 @@
+"""
+Pytorch implementation of neural symbolic machines
+Usage:
+    experiments.py --config=<file> [options]
+
+Options:
+    -h --help                               show this screen.
+    --cuda                                  use GPU
+    --config=<file>                         path to config file
+    --seed=<int>                            seed [default: 0]
+"""
+
 import json
 import os
 import sys
 import time
 from typing import List
 import ctypes
+import numpy as np
+import torch
+from tensorboardX import SummaryWriter
 
-from nsm.actor import Actor
+from nsm.actor import Actor, AllGoodReplayBuffer
 from nsm.agent_factory import PGAgent
 from nsm.embedding import EmbeddingModel
 from nsm.env_factory import QAProgrammingEnv
@@ -18,6 +33,7 @@ from nsm.evaluator import Evaluator
 from nsm.learner import Learner
 
 import multiprocessing
+from docopt import docopt
 
 
 def load_environments(example_files: List[str], table_file: str, vocab_file: str, en_vocab_file: str, embedding_file: str):
@@ -145,11 +161,15 @@ def run_sample():
     config = json.load(open('config.json'))
     agent = PGAgent.build(config)
 
-    agent.save(config['work_dir'] + '/model.bin')
+    # agent.save(config['work_dir'] + '/model.bin')
     # agent2 = PGAgent.load(config['work_dir'] + '/model.bin')
 
     t1 = time.time()
-    # agent.beam_search(envs[:1], 10)
+    agent.beam_search(envs[:5], 32)
+    t2 = time.time()
+    print(t2 - t1)
+    return
+
     for env in envs:
         agent.decode_examples([env], 10)
 
@@ -163,18 +183,35 @@ def run_sample():
     print(t3 - t2)
 
 
-def run():
-    config = json.load(open('config.json'))
+def run(args):
+    config_file = args['--config']
+    use_cuda = args['--cuda']
+
+    print(f'load config file [{config_file}]', file=sys.stderr)
+    config = json.load(open(config_file))
 
     work_dir = config['work_dir']
+    print(f'work dir [{work_dir}]', file=sys.stderr)
+
     if not os.path.exists(work_dir):
         print(f'creating work dir [{work_dir}]', file=sys.stderr)
         os.makedirs(work_dir)
 
-    actor_num = config['actor_num']
-    learner = Learner(config)
+    json.dump(config, open(os.path.join(work_dir, 'config.json'), 'w'), indent=2)
 
-    print('initializing learner and %d actors' % actor_num, file=sys.stderr)
+    learner_gpu_id = evaluator_gpu_id = -1
+    if use_cuda:
+        print(f'use cuda', file=sys.stderr)
+        learner_gpu_id = 0
+        evaluator_gpu_id = 1
+
+    learner = Learner(config, learner_gpu_id)
+
+    evaluator = Evaluator(config, eval_file=config['dev_file'], gpu_id=evaluator_gpu_id)
+    learner.register_evaluator(evaluator)
+
+    actor_num = config['actor_num']
+    print('initializing %d actors' % actor_num, file=sys.stderr)
     actors = []
     actor_shard_dict = {i: [] for i in range(actor_num)}
     shard_start_id = config['shard_start_id']
@@ -189,9 +226,6 @@ def run():
 
         actors.append(actor)
 
-    evaluator = Evaluator(config, eval_file=config['dev_file'])
-    learner.register_evaluator(evaluator)
-
     # actors[0].run()
     print('starting %d actors' % actor_num, file=sys.stderr)
     for actor in actors:
@@ -203,10 +237,55 @@ def run():
     print('starting learner', file=sys.stderr)
     learner.start()
 
+    print('Learner process {}, evaluator process {}'.format(learner.pid, evaluator.pid), file=sys.stderr)
+
     for actor in actors:
         actor.join()
     learner.join()
     evaluator.join()
+
+
+def main():
+    args = docopt(__doc__)
+
+    # seed the random number generators
+    seed = int(args['--seed'])
+    torch.manual_seed(seed)
+    if args['--cuda']:
+        torch.cuda.manual_seed(seed)
+    np.random.seed(seed * 13 // 7)
+
+    run(args)
+
+
+def sanity_check():
+    envs = load_environments(["/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/data_split_1/train_split_shard_90-0.jsonl"],
+                             "/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/tables.jsonl",
+                             vocab_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable/raw_input/wikitable_glove_vocab.json",
+                             en_vocab_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/en_vocab_min_count_5.json",
+                             embedding_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable/raw_input/wikitable_glove_embedding_mat.npy")
+
+    config = json.load(open('config.json'))
+    agent = PGAgent.build(config)
+
+    buffer = AllGoodReplayBuffer(agent, envs[0].de_vocab)
+
+    from nsm.actor import load_programs_to_buffer
+    load_programs_to_buffer(envs, buffer, config['saved_program_file'])
+
+    trajs1 = buffer._buffer[envs[0].name][:3]
+    trajs2 = buffer._buffer[envs[1].name][:3]
+    trajs3 = buffer._buffer[envs[2].name][:3]
+    trajs4 = buffer._buffer[envs[3].name][:3]
+    agent.eval()
+
+    batch_probs = agent(trajs1 + trajs2 + trajs3 + trajs4)
+
+    print(batch_probs)
+    for traj in trajs1 + trajs2 + trajs3 + trajs4:
+        single_prob = agent.compute_trajectory_prob([traj])
+        print(single_prob)
+    pass
 
 
 if __name__ == '__main__':
@@ -219,15 +298,16 @@ if __name__ == '__main__':
     # env_dict = {env.name: env for env in envs}
     # env_dict['nt-3035'].interpreter.interactive(assisted=True)
 
-    # examples = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/train_examples.jsonl")
-    # tables = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/tables.jsonl")
-    #
+    # examples = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/train_examples.jsonl")
+    # tables = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/tables.jsonl")
+    # #
     # examples_dict = {e['id']: e for e in examples}
     # tables_dict = {tab['name']: tab for tab in tables}
-    #
-    # q_id = 'nt-10742'
+    # #
+    # q_id = 'nt-13522'
     # interpreter = init_interpreter_for_example(examples_dict[q_id], tables_dict[examples_dict[q_id]['context']])
     # interpreter.interactive(assisted=True)
 
     # run_sample()
-    run()
+    main()
+    # sanity_check()

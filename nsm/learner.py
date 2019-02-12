@@ -16,19 +16,23 @@ from nsm.agent_factory import PGAgent, Sample
 from nsm.env_factory import Trajectory
 
 import torch
+from tensorboardX import SummaryWriter
 
 
 class Learner(Process):
-    def __init__(self, config):
+    def __init__(self, config, gpu_id=-1, summary_writer=None):
         super(Learner, self).__init__(daemon=True)
 
         self.train_queue = multiprocessing.Queue()
         self.config = config
+        self.gpu_id = gpu_id
         self.actor_message_vars = []
 
     def run(self):
         # create agent
-        self.agent = PGAgent.build(self.config)
+        self.agent = PGAgent.build(self.config).train()
+        if self.gpu_id >= 0:
+            self.agent.to(torch.device("cuda:%d" % self.gpu_id))
 
         self.train()
 
@@ -36,8 +40,13 @@ class Learner(Process):
         model = self.agent
         train_iter = 0
         save_every_niter = self.config['save_every_niter']
+        summary_writer = SummaryWriter(os.path.join(self.config['work_dir'], 'tb_log/train'))
+        old_model_path = None
         params = [p for p in model.parameters() if p.requires_grad]
         optimizer = torch.optim.Adam(params, lr=0.001)
+
+        cum_loss = cum_examples = 0.
+        t1 = time.time()
 
         nn_util.glorot_init(params)
 
@@ -49,24 +58,39 @@ class Learner(Process):
             train_trajectories = [sample.trajectory for sample in train_samples]
 
             # (batch_size)
-            batch_loss = self.agent(train_trajectories)
+            batch_log_prob = self.agent(train_trajectories)
 
-            loss = -batch_loss.mean()
+            loss = -batch_log_prob.mean()
+            loss.backward()
+            loss_val = loss.item()
 
             # clip gradient
-            grad_norm = torch.nn.utils.clip_grad_norm(params, 5.)
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, 5.)
 
             optimizer.step()
 
-            print(f'[Learner] train_iter={train_iter} loss={loss.item()}', file=sys.stderr)
+            # print(f'[Learner] train_iter={train_iter} loss={loss_val}', file=sys.stderr)
             del loss
 
+            summary_writer.add_scalar('train_loss', loss_val, train_iter)
+            cum_loss += loss_val * len(train_samples)
+            cum_examples += len(train_samples)
+
             if train_iter > 0 and train_iter % save_every_niter == 0:
+                print(f'[Learner] train_iter={train_iter} avg. loss={cum_loss / cum_examples}, '
+                      f'{cum_examples} examples ({cum_examples / (time.time() - t1)} examples/s)', file=sys.stderr)
+                cum_loss = cum_examples = 0.
+                t1 = time.time()
+
                 model_state = model.state_dict()
                 model_save_path = os.path.join(self.config['work_dir'], 'agent_state.iter%d.bin' % train_iter)
                 torch.save(model_state, model_save_path)
 
                 self.push_new_model(model_save_path)
+
+                if old_model_path:
+                    os.remove(old_model_path)
+                old_model_path = model_save_path
 
     def push_new_model(self, model_path):
         t1 = time.time()

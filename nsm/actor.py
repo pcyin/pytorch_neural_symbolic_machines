@@ -222,6 +222,7 @@ class Actor(Process):
 
         # create agent and set it to evaluation mode
         self.agent = PGAgent.build(self.config).eval()
+        nn_util.glorot_init(p for p in self.agent.parameters() if p.requires_grad)
 
         self.replay_buffer = AllGoodReplayBuffer(self.agent, self.environments[0].de_vocab)
 
@@ -243,10 +244,12 @@ class Actor(Process):
                 for batch_id, batched_envs in enumerate(batch_iter):
                     print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}', file=sys.stderr)
                     # perform sampling
+                    t1 = time.time()
                     explore_samples = self.agent.sample(batched_envs,
                                                         sample_num=config['n_explore_samples'],
                                                         use_cache=config['use_cache'])
-                    print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, sampled {len(explore_samples)} trajectories', file=sys.stderr)
+                    t2 = time.time()
+                    print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, sampled {len(explore_samples)} trajectories (took {t2 - t1}s)', file=sys.stderr)
 
                     # retain samples with high reward
                     good_explore_samples = [sample for sample in explore_samples if sample.trajectory.reward == 1.]

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """Copy and extended from WikiTableQuestions dataset release."""
+import math
 
 u"""Official Evaluator for WikiTableQuestions Dataset
 
@@ -407,6 +408,10 @@ def target_values_map(targetValue, targetCanon):
     return target_values
 
 def check_prediction(ts_prediction_string, target_values):
+    # TODO: this may not be quite elegant
+    if isinstance(ts_prediction_string, float) and math.isinf(ts_prediction_string):
+        ts_prediction_string = 'inf'
+
     predicted_values = to_value_list(ts_prediction_string)
     correct = check_denotation(target_values, predicted_values)
     return correct

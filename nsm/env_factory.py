@@ -1,5 +1,5 @@
 "A collections of environments of sequence generations tasks."
-
+import sys
 from typing import List, Dict, Any
 import collections
 import pprint
@@ -21,12 +21,15 @@ class Observation(object):
         self.valid_action_mask = valid_action_mask
 
     def to(self, device: torch.device):
-        self.read_ind.to(device)
-        self.write_ind.to(device)
+        if self.read_ind.device == device:
+            return self
+
+        self.read_ind = self.read_ind.to(device)
+        self.write_ind = self.write_ind.to(device)
         if self.valid_action_indices is not None:
-            self.valid_action_indices.to(device)
-        self.output_features.to(device)
-        self.valid_action_mask.to(device)
+            self.valid_action_indices = self.valid_action_indices.to(device)
+        self.output_features = self.output_features.to(device)
+        self.valid_action_mask = self.valid_action_mask.to(device)
 
         return self
 
@@ -342,7 +345,11 @@ class QAProgrammingEnv(Environment):
         # extra work or we don't care, its result will be
         # scored, and the score will be used as reward.
         if self.done and not (self.punish_extra_work and self.interpreter.has_extra_work()):
-            reward = self.score_fn(self.interpreter.result, self.answer)
+            try:
+                reward = self.score_fn(self.interpreter.result, self.answer)
+            except:
+                print(f'Error: Env {self.name}, program [{" ".join(self.interpreter.history)}], result=[{repr(self.interpreter.result)}]', file=sys.stderr)
+                exit(-1)
         else:
             reward = 0.0
 

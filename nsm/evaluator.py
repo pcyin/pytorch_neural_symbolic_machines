@@ -1,8 +1,11 @@
 import os
+import re
 import sys
 import time
 from typing import List, Union
 import numpy as np
+from tensorboardX import SummaryWriter
+
 from nsm.agent_factory import Sample, PGAgent
 from nsm.env_factory import QAProgrammingEnv
 
@@ -16,14 +19,14 @@ class Evaluation(object):
     def evaluate(dataset: List[QAProgrammingEnv], decoding_results=Union[List[List[Sample]], List[Sample]],
                           verbose=False):
         if isinstance(decoding_results[0], Sample):
-            decoding_results  = [[hyp] for hyp in decoding_results]
+            decoding_results = [[hyp] for hyp in decoding_results]
 
         acc_list = []
         oracle_acc_list = []
 
         for env, hyp_list in zip(dataset, decoding_results):
             is_top_correct = len(hyp_list) > 0 and hyp_list[0].trajectory.reward == 1.
-            has_correct_program = any(hyp.trajectory.reward == 1. for hyp in decoding_results)
+            has_correct_program = any(hyp.trajectory.reward == 1. for hyp in hyp_list)
 
             acc_list.append(is_top_correct)
             oracle_acc_list.append(has_correct_program)
@@ -35,18 +38,23 @@ class Evaluation(object):
 
 
 class Evaluator(Process):
-    def __init__(self, config, eval_file):
+    def __init__(self, config, eval_file, gpu_id=-1):
         super(Evaluator, self).__init__()
         self.eval_queue = Queue()
         self.config = config
         self.eval_file = eval_file
+        self.gpu_id = gpu_id
 
         self.model_path = 'INIT_MODEL'
         self.message_var = None
 
     def run(self):
-        self.agent = PGAgent.build(self.config)
+        self.agent = PGAgent.build(self.config).eval()
+        if self.gpu_id >= 0:
+            self.agent.to(torch.device("cuda:%d" % self.gpu_id))
+
         self.load_environments()
+        summary_writer = SummaryWriter(os.path.join(self.config['work_dir'], 'tb_log/dev'))
 
         dev_scores = []
 
@@ -62,10 +70,15 @@ class Evaluator(Process):
                 t2 = time.time()
                 print(f'[Evaluator] result={repr(eval_results)}, took {t2 - t1}s', file=sys.stderr)
 
-                dev_score = eval_results['acc']
+                summary_writer.add_scalar('eval/accuracy', eval_results['accuracy'], self.get_global_step())
+                summary_writer.add_scalar('eval/oracle_accuracy', eval_results['oracle_accuracy'], self.get_global_step())
+
+                dev_score = eval_results['accuracy']
                 if not dev_scores or max(dev_scores) < dev_score:
                     print(f'[Evaluator] save the current best model', file=sys.stderr)
                     self.agent.save(os.path.join(self.config['work_dir'], 'model.best.bin'))
+
+                sys.stderr.flush()
 
             time.sleep(2)  # in seconds
 
@@ -95,3 +108,8 @@ class Evaluator(Process):
             return True
         else:
             return False
+
+    def get_global_step(self):
+        train_iter = re.search('iter(\d+)?', self.model_path).group(1)
+
+        return int(train_iter)
