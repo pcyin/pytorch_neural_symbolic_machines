@@ -1,13 +1,16 @@
 """
 Pytorch implementation of neural symbolic machines
 Usage:
-    experiments.py --config=<file> [options]
+    experiments.py train --work-dir=<dir> --config=<file> [options]
+    experiments.py test --model=<file> --test-file=<file> [options]
 
 Options:
     -h --help                               show this screen.
     --cuda                                  use GPU
+    --work-dir=<dir>                        work directory
     --config=<file>                         path to config file
     --seed=<int>                            seed [default: 0]
+    --eval-batch-size=<int>                 batch size for evaluation [default: 5]
 """
 
 import json
@@ -29,7 +32,7 @@ from nsm.data_utils import Vocab
 import nsm.executor_factory as executor_factory
 import table.utils as utils
 from nsm.data_utils import load_jsonl
-from nsm.evaluator import Evaluator
+from nsm.evaluator import Evaluator, Evaluation
 from nsm.learner import Learner
 
 import multiprocessing
@@ -183,15 +186,16 @@ def run_sample():
     print(t3 - t2)
 
 
-def run(args):
+def distributed_train(args):
     config_file = args['--config']
     use_cuda = args['--cuda']
 
     print(f'load config file [{config_file}]', file=sys.stderr)
     config = json.load(open(config_file))
 
-    work_dir = config['work_dir']
+    work_dir = args['--work-dir']
     print(f'work dir [{work_dir}]', file=sys.stderr)
+    config['work_dir'] = work_dir
 
     if not os.path.exists(work_dir):
         print(f'creating work dir [{work_dir}]', file=sys.stderr)
@@ -245,6 +249,36 @@ def run(args):
     evaluator.join()
 
 
+def test(args):
+    use_gpu = args['--cuda']
+    model_path = args['--model']
+    print(f'loading model [{model_path}] for evaluation', file=sys.stderr)
+    agent = PGAgent.load(model_path, gpu_id=0 if use_gpu else -1).eval()
+    config = agent.config
+
+    test_file = args['--test-file']
+    print(f'loading test file [{test_file}]', file=sys.stderr)
+    test_envs = load_environments([test_file],
+                                  table_file=config['table_file'],
+                                  vocab_file=config['vocab_file'],
+                                  en_vocab_file=config['en_vocab_file'],
+                                  embedding_file=config['embedding_file'])
+
+    # test_envs = load_environments([test_file],
+    #                               table_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/tables.jsonl",
+    #                               vocab_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable/raw_input/wikitable_glove_vocab.json",
+    #                               en_vocab_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/en_vocab_min_count_5.json",
+    #                               embedding_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable/raw_input/wikitable_glove_embedding_mat.npy")
+
+    batch_size = int(args['--eval-batch-size'])
+    print(f'batch size [{batch_size}]', file=sys.stderr)
+    decode_results = agent.decode_examples(test_envs,
+                                           beam_size=config['beam_size'],
+                                           batch_size=batch_size)
+    eval_results = Evaluation.evaluate(test_envs, decode_results)
+    print(eval_results, file=sys.stderr)
+
+
 def main():
     args = docopt(__doc__)
 
@@ -255,7 +289,10 @@ def main():
         torch.cuda.manual_seed(seed)
     np.random.seed(seed * 13 // 7)
 
-    run(args)
+    if args['train']:
+        distributed_train(args)
+    elif args['test']:
+        test(args)
 
 
 def sanity_check():
@@ -285,7 +322,8 @@ def sanity_check():
     for traj in trajs1 + trajs2 + trajs3 + trajs4:
         single_prob = agent.compute_trajectory_prob([traj])
         print(single_prob)
-    pass
+
+    agent.decode_examples(envs[:1], beam_size=5)
 
 
 if __name__ == '__main__':

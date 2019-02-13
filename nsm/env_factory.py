@@ -227,6 +227,9 @@ class QAProgrammingEnv(Environment):
                  punish_extra_work=True,
                  init_interp=True, trigger_words_dict=None,
                  max_cache_size=1e4,
+                 context=None, id_feature_dict=None,
+                 cache=None,
+                 reset=True,
                  name='qa_programming'):
 
         self.name = name
@@ -250,57 +253,72 @@ class QAProgrammingEnv(Environment):
         self.n_exp = interpreter.max_n_exp
         max_n_constants = self.n_mem - self.n_exp
 
-        # initialize constants to be used in the interpreter
-        constant_spans = []
-        constant_values = []
-        if constants is None:
-            constants = []
-        for c in constants:
-            constant_spans.append([-1, -1])
-            constant_values.append(c['value'])
-            if init_interp:
-                self.interpreter.add_constant(
-                    value=c['value'], type=c['type'])
+        if context:
+            self.context = context
+        else:
+            # initialize constants to be used in the interpreter
 
-        for entity in question_annotation['entities']:
-            constant_spans.append(
-                [entity['token_start'], entity['token_end'] - 1])
-            constant_values.append(entity['value'])
+            constant_spans = []
+            constant_values = []
+            if constants is None:
+                constants = []
+            for c in constants:
+                constant_spans.append([-1, -1])
+                constant_values.append(c['value'])
+                if init_interp:
+                    self.interpreter.add_constant(
+                        value=c['value'], type=c['type'])
 
-            if init_interp:
-                self.interpreter.add_constant(
-                    value=entity['value'], type=entity['type'])
+            for entity in question_annotation['entities']:
+                constant_spans.append(
+                    [entity['token_start'], entity['token_end'] - 1])
+                constant_values.append(entity['value'])
 
-        # Use encoder output at start and end (inclusive) step
-        # to create span embedding.
-        constant_value_embeddings = [
-            constant_value_embedding_fn(value) for value in constant_values]
+                if init_interp:
+                    self.interpreter.add_constant(
+                        value=entity['value'], type=entity['type'])
 
-        if len(constant_values) > (self.n_mem - self.n_exp):
-            print('Not enough memory slots for example {}, which has {} constants.'.format(
+            constant_spans = constant_spans[:max_n_constants]
+
+            if len(constant_values) > (self.n_mem - self.n_exp):
+                print('Not enough memory slots for example {}, which has {} constants.'.format(
                     self.name, len(constant_values)))
 
-        constant_spans = constant_spans[:max_n_constants]
-        constant_value_embeddings = constant_value_embeddings[:max_n_constants]
-        self.context = dict(question_word_ids=en_inputs,
-                            constant_spans=constant_spans,
-                            constant_value_embeddings=constant_value_embeddings,
-                            question_features=question_annotation['features'],
-                            question_tokens=tokens)
+            # Use encoder output at start and end (inclusive) step
+            # to create span embedding.
+            constant_value_embeddings = [
+                constant_value_embedding_fn(value) for value in constant_values]
+
+            constant_value_embeddings = constant_value_embeddings[:max_n_constants]
+
+            self.context = dict(question_word_ids=en_inputs,
+                                constant_spans=constant_spans,
+                                constant_value_embeddings=constant_value_embeddings,
+                                question_features=question_annotation['features'],
+                                question_tokens=tokens)
 
         # Create output features.
-        prop_features = question_annotation['prop_features']
-        self.id_feature_dict = {}
-        for name, id in de_vocab.vocab.items():
-            self.id_feature_dict[id] = [0]
-            if name in self.interpreter.namespace:
-                val = self.interpreter.namespace[name]['value']
-                if (isinstance(val, str)) and val in prop_features:
-                    self.id_feature_dict[id] = prop_features[val]
+        if id_feature_dict:
+            self.id_feature_dict = id_feature_dict
+        else:
+            prop_features = question_annotation['prop_features']
+            self.id_feature_dict = {}
+            for name, id in de_vocab.vocab.items():
+                self.id_feature_dict[id] = [0]
+                if name in self.interpreter.namespace:
+                    val = self.interpreter.namespace[name]['value']
+                    if (isinstance(val, str)) and val in prop_features:
+                        self.id_feature_dict[id] = prop_features[val]
 
-        self.cache = SearchCache(name=name, max_elements=max_cache_size)
+        if cache:
+            self.cache = cache
+        else:
+            self.cache = SearchCache(name=name, max_elements=max_cache_size)
+
         self.use_cache = False
-        self.reset()
+
+        if reset:
+            self.reset()
 
     def get_context(self):
         return self.context
@@ -444,7 +462,12 @@ class QAProgrammingEnv(Environment):
             constant_value_embedding_fn=self.constant_value_embedding_fn,
             constants=self.constants,
             answer=self.answer, interpreter=new_interpreter,
-            init_interp=False)
+            init_interp=False,
+            context=self.context,
+            id_feature_dict=self.id_feature_dict,
+            cache=self.cache,
+            reset=False,
+        )
         new.actions = self.actions[:]
         new.mapped_actions = self.mapped_actions[:]
         new.rewards = self.rewards[:]
@@ -455,10 +478,12 @@ class QAProgrammingEnv(Environment):
         new.cache = self.cache
         new.use_cache = self.use_cache
         new.valid_actions = self.valid_actions
+        new.start_ob = self.start_ob
         new.error = self.error
         new.id_feature_dict = self.id_feature_dict
         new.punish_extra_work = self.punish_extra_work
         new.trigger_words_dict = self.trigger_words_dict
+
         return new
 
     def show(self):

@@ -40,6 +40,7 @@ class Learner(Process):
         model = self.agent
         train_iter = 0
         save_every_niter = self.config['save_every_niter']
+        entropy_reg_weight = self.config['entropy_reg_weight']
         summary_writer = SummaryWriter(os.path.join(self.config['work_dir'], 'tb_log/train'))
         old_model_path = None
         params = [p for p in model.parameters() if p.requires_grad]
@@ -49,6 +50,9 @@ class Learner(Process):
         t1 = time.time()
 
         nn_util.glorot_init(params)
+        torch.nn.init.zeros_(model.decoder.output_feature_linear.weight)
+        torch.nn.init.normal_(model.encoder.context_embedder.trainable_embedding.weight, mean=0., std=0.1)
+        torch.nn.init.normal_(model.decoder.builtin_func_embeddings.weight, mean=0., std=0.1)
 
         while True:
             train_iter += 1
@@ -58,9 +62,18 @@ class Learner(Process):
             train_trajectories = [sample.trajectory for sample in train_samples]
 
             # (batch_size)
-            batch_log_prob = self.agent(train_trajectories)
+            batch_log_prob, entropy = self.agent(train_trajectories, entropy=True)
 
             loss = -batch_log_prob.mean()
+
+            if entropy_reg_weight != 0.:
+                entropy = entropy.mean()
+                ent_reg_loss = - entropy_reg_weight * entropy  # maximize entropy
+                loss = loss + ent_reg_loss
+
+                summary_writer.add_scalar('entropy', entropy.item(), train_iter)
+                summary_writer.add_scalar('entropy_reg_loss', ent_reg_loss.item(), train_iter)
+
             loss.backward()
             loss_val = loss.item()
 
@@ -71,6 +84,7 @@ class Learner(Process):
 
             # print(f'[Learner] train_iter={train_iter} loss={loss_val}', file=sys.stderr)
             del loss
+            if entropy_reg_weight: del entropy
 
             summary_writer.add_scalar('train_loss', loss_val, train_iter)
             cum_loss += loss_val * len(train_samples)

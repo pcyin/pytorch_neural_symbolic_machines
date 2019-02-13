@@ -78,6 +78,8 @@ class Evaluator(Process):
                     print(f'[Evaluator] save the current best model', file=sys.stderr)
                     self.agent.save(os.path.join(self.config['work_dir'], 'model.best.bin'))
 
+                dev_scores.append(dev_score)
+
                 sys.stderr.flush()
 
             time.sleep(2)  # in seconds
