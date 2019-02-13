@@ -16,8 +16,7 @@ import torch
 
 class Evaluation(object):
     @staticmethod
-    def evaluate(dataset: List[QAProgrammingEnv], decoding_results=Union[List[List[Sample]], List[Sample]],
-                          verbose=False):
+    def evaluate(dataset: List[QAProgrammingEnv], decoding_results=Union[List[List[Sample]], List[Sample]], verbose=False):
         if isinstance(decoding_results[0], Sample):
             decoding_results = [[hyp] for hyp in decoding_results]
 
@@ -91,6 +90,8 @@ class Evaluator(Process):
                                  vocab_file=self.config['vocab_file'],
                                  en_vocab_file=self.config['en_vocab_file'],
                                  embedding_file=self.config['embedding_file'])
+        for env in envs:
+            env.punish_extra_work = False
 
         self.environments = envs
 

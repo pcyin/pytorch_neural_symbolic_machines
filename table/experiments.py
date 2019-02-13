@@ -10,13 +10,16 @@ Options:
     --work-dir=<dir>                        work directory
     --config=<file>                         path to config file
     --seed=<int>                            seed [default: 0]
-    --eval-batch-size=<int>                 batch size for evaluation [default: 5]
+    --eval-batch-size=<int>                 batch size for evaluation [default: 32]
+    --eval-beam-size=<int>                  beam size for evaluation [default: 5]
+    --save-decode-to=<file>                 save decoding results to file [default: '']
 """
 
 import json
 import os
 import sys
 import time
+from collections import OrderedDict
 from typing import List
 import ctypes
 import numpy as np
@@ -39,7 +42,8 @@ import multiprocessing
 from docopt import docopt
 
 
-def load_environments(example_files: List[str], table_file: str, vocab_file: str, en_vocab_file: str, embedding_file: str):
+def load_environments(example_files: List[str], table_file: str, vocab_file: str, en_vocab_file: str,
+                      embedding_file: str):
     dataset = []
     for fn in example_files:
         dataset += load_jsonl(fn)
@@ -127,6 +131,39 @@ def create_environments(table_dict, dataset, en_vocab, embedding_model, executor
     return all_envs
 
 
+def to_human_readable_program(program, env):
+    env = env.clone()
+    env.use_cache = False
+    ob = env.start_ob
+
+    for tk in program:
+        valid_actions = list(ob[0].valid_action_indices)
+        action_id = env.de_vocab.lookup(tk)
+        rel_action_id = valid_actions.index(action_id)
+        ob, _, _, _ = env.step(rel_action_id)
+
+    readable_program = []
+    first_intermediate_var_id = len(
+        [v for v, entry in env.interpreter.namespace.iteritems() if v.startswith('v') and entry['is_constant']])
+    for tk in program:
+        if tk.startswith('v'):
+            mem_entry = env.interpreter.namespace[tk]
+            if mem_entry['is_constant']:
+                if isinstance(mem_entry['value'], list):
+                    token = mem_entry['value'][0]
+                else:
+                    token = mem_entry['value']
+            else:
+                intermediate_var_relative_id = int(tk[1:]) - first_intermediate_var_id
+                token = 'v{}'.format(intermediate_var_relative_id)
+        else:
+            token = tk
+
+        readable_program.append(token)
+
+    return readable_program
+
+
 def init_interpreter_for_example(example_dict, table_dict):
     executor = executor_factory.WikiTableExecutor(table_dict)
     api = executor.get_api()
@@ -155,7 +192,8 @@ def init_interpreter_for_example(example_dict, table_dict):
 
 
 def run_sample():
-    envs = load_environments(["/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/data_split_1/train_split_shard_90-0.jsonl"],
+    envs = load_environments([
+                                 "/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/data_split_1/train_split_shard_90-0.jsonl"],
                              "/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/tables.jsonl",
                              vocab_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable/raw_input/wikitable_glove_vocab.json",
                              en_vocab_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/en_vocab_min_count_5.json",
@@ -263,6 +301,8 @@ def test(args):
                                   vocab_file=config['vocab_file'],
                                   en_vocab_file=config['en_vocab_file'],
                                   embedding_file=config['embedding_file'])
+    for env in test_envs:
+        env.punish_extra_work = False
 
     # test_envs = load_environments([test_file],
     #                               table_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/tables.jsonl",
@@ -271,12 +311,31 @@ def test(args):
     #                               embedding_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable/raw_input/wikitable_glove_embedding_mat.npy")
 
     batch_size = int(args['--eval-batch-size'])
-    print(f'batch size [{batch_size}]', file=sys.stderr)
+    beam_size = int(args['--eval-beam-size'])
+    if beam_size == 0:
+        beam_size = config['beam_size']
+    print(f'batch size {batch_size}, beam size {beam_size}', file=sys.stderr)
     decode_results = agent.decode_examples(test_envs,
-                                           beam_size=config['beam_size'],
+                                           beam_size=beam_size,
                                            batch_size=batch_size)
+    assert len(test_envs) == len(decode_results)
     eval_results = Evaluation.evaluate(test_envs, decode_results)
     print(eval_results, file=sys.stderr)
+
+    save_to = args['--save-decode-to']
+    if save_to:
+        print(f'save results to [{save_to}]', file=sys.stderr)
+
+        results = OrderedDict()
+        for env, hyp_list in zip(test_envs, decode_results):
+            for hyp in hyp_list:
+                results.setdefault(env.name, []).append(OrderedDict(
+                    program=hyp.trajectory.program,
+                    is_correct=hyp.trajectory.reward == 1.,
+                    prob=hyp.prob
+                ))
+
+        json.dump(results, open(save_to, 'w'), indent=2)
 
 
 def main():
@@ -296,7 +355,8 @@ def main():
 
 
 def sanity_check():
-    envs = load_environments(["/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/data_split_1/train_split_shard_90-0.jsonl"],
+    envs = load_environments([
+                                 "/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/data_split_1/train_split_shard_90-0.jsonl"],
                              "/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/tables.jsonl",
                              vocab_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable/raw_input/wikitable_glove_vocab.json",
                              en_vocab_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/en_vocab_min_count_5.json",
