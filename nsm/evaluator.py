@@ -91,6 +91,7 @@ class Evaluator(Process):
                                  en_vocab_file=self.config['en_vocab_file'],
                                  embedding_file=self.config['embedding_file'])
         for env in envs:
+            env.use_cache = False
             env.punish_extra_work = False
 
         self.environments = envs

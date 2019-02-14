@@ -12,7 +12,7 @@ Options:
     --seed=<int>                            seed [default: 0]
     --eval-batch-size=<int>                 batch size for evaluation [default: 32]
     --eval-beam-size=<int>                  beam size for evaluation [default: 5]
-    --save-decode-to=<file>                 save decoding results to file [default: '']
+    --save-decode-to=<file>                 save decoding results to file [default: None]
 """
 
 import json
@@ -137,14 +137,14 @@ def to_human_readable_program(program, env):
     ob = env.start_ob
 
     for tk in program:
-        valid_actions = list(ob[0].valid_action_indices)
+        valid_actions = list(ob.valid_action_indices)
         action_id = env.de_vocab.lookup(tk)
         rel_action_id = valid_actions.index(action_id)
         ob, _, _, _ = env.step(rel_action_id)
 
     readable_program = []
     first_intermediate_var_id = len(
-        [v for v, entry in env.interpreter.namespace.iteritems() if v.startswith('v') and entry['is_constant']])
+        [v for v, entry in env.interpreter.namespace.items() if v.startswith('v') and entry['is_constant']])
     for tk in program:
         if tk.startswith('v'):
             mem_entry = env.interpreter.namespace[tk]
@@ -192,8 +192,7 @@ def init_interpreter_for_example(example_dict, table_dict):
 
 
 def run_sample():
-    envs = load_environments([
-                                 "/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/data_split_1/train_split_shard_90-0.jsonl"],
+    envs = load_environments(["/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/data_split_1/train_split_shard_90-0.jsonl"],
                              "/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/tables.jsonl",
                              vocab_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable/raw_input/wikitable_glove_vocab.json",
                              en_vocab_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/en_vocab_min_count_5.json",
@@ -245,7 +244,7 @@ def distributed_train(args):
     if use_cuda:
         print(f'use cuda', file=sys.stderr)
         learner_gpu_id = 0
-        evaluator_gpu_id = 1
+        evaluator_gpu_id = 1 # 1 if torch.cuda.device_count() >= 2 else 0
 
     learner = Learner(config, learner_gpu_id)
 
@@ -302,6 +301,7 @@ def test(args):
                                   en_vocab_file=config['en_vocab_file'],
                                   embedding_file=config['embedding_file'])
     for env in test_envs:
+        env.use_cache = False
         env.punish_extra_work = False
 
     # test_envs = load_environments([test_file],
@@ -323,14 +323,15 @@ def test(args):
     print(eval_results, file=sys.stderr)
 
     save_to = args['--save-decode-to']
-    if save_to:
+    if save_to != 'None':
         print(f'save results to [{save_to}]', file=sys.stderr)
 
         results = OrderedDict()
         for env, hyp_list in zip(test_envs, decode_results):
+            results[env.name] = []
             for hyp in hyp_list:
-                results.setdefault(env.name, []).append(OrderedDict(
-                    program=hyp.trajectory.program,
+                results[env.name].append(OrderedDict(
+                    program=to_human_readable_program(hyp.trajectory.program, env),
                     is_correct=hyp.trajectory.reward == 1.,
                     prob=hyp.prob
                 ))
@@ -355,6 +356,11 @@ def main():
 
 
 def sanity_check():
+    torch.manual_seed(123)
+    np.random.seed(123 * 13 // 7)
+    import random
+    random.seed(123)
+
     envs = load_environments([
                                  "/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/data_split_1/train_split_shard_90-0.jsonl"],
                              "/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/tables.jsonl",
@@ -363,27 +369,40 @@ def sanity_check():
                              embedding_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable/raw_input/wikitable_glove_embedding_mat.npy")
 
     config = json.load(open('config.json'))
-    agent = PGAgent.build(config)
+    agent = PGAgent.build(config).eval()
 
-    buffer = AllGoodReplayBuffer(agent, envs[0].de_vocab)
+    t1 = time.time()
+    for i in range(5):
+        samples1 = agent.new_sample(envs[:5], sample_num=128)
+    print('took %f s' % ((time.time() - t1) / 5))
+    # print(samples1[0])
 
-    from nsm.actor import load_programs_to_buffer
-    load_programs_to_buffer(envs, buffer, config['saved_program_file'])
+    t1 = time.time()
+    for i in range(5):
+        samples2 = agent.sample(envs[:5], sample_num=128)
+    print('took %f s' % ((time.time() - t1) / 5))
+    # print(samples2[0])
 
-    trajs1 = buffer._buffer[envs[0].name][:3]
-    trajs2 = buffer._buffer[envs[1].name][:3]
-    trajs3 = buffer._buffer[envs[2].name][:3]
-    trajs4 = buffer._buffer[envs[3].name][:3]
-    agent.eval()
-
-    batch_probs = agent(trajs1 + trajs2 + trajs3 + trajs4)
-
-    print(batch_probs)
-    for traj in trajs1 + trajs2 + trajs3 + trajs4:
-        single_prob = agent.compute_trajectory_prob([traj])
-        print(single_prob)
-
-    agent.decode_examples(envs[:1], beam_size=5)
+    #
+    # buffer = AllGoodReplayBuffer(agent, envs[0].de_vocab)
+    #
+    # from nsm.actor import load_programs_to_buffer
+    # load_programs_to_buffer(envs, buffer, config['saved_program_file'])
+    #
+    # trajs1 = buffer._buffer[envs[0].name][:3]
+    # trajs2 = buffer._buffer[envs[1].name][:3]
+    # trajs3 = buffer._buffer[envs[2].name][:3]
+    # trajs4 = buffer._buffer[envs[3].name][:3]
+    # agent.eval()
+    #
+    # batch_probs = agent(trajs1 + trajs2 + trajs3 + trajs4)
+    #
+    # print(batch_probs)
+    # for traj in trajs1 + trajs2 + trajs3 + trajs4:
+    #     single_prob = agent.compute_trajectory_prob([traj])
+    #     print(single_prob)
+    #
+    # agent.decode_examples(envs[:1], beam_size=5)
 
 
 if __name__ == '__main__':
@@ -392,16 +411,16 @@ if __name__ == '__main__':
     #                          vocab_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable/raw_input/wikitable_glove_vocab.json",
     #                          en_vocab_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable/processed_input/preprocess_14/en_vocab_min_count_5.json",
     #                          embedding_file="/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable/raw_input/wikitable_glove_embedding_mat.npy")
-    #
+    # #
     # env_dict = {env.name: env for env in envs}
     # env_dict['nt-3035'].interpreter.interactive(assisted=True)
 
     # examples = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/train_examples.jsonl")
     # tables = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/tables.jsonl")
-    # #
+    # # #
     # examples_dict = {e['id']: e for e in examples}
     # tables_dict = {tab['name']: tab for tab in tables}
-    # #
+    # # #
     # q_id = 'nt-13522'
     # interpreter = init_interpreter_for_example(examples_dict[q_id], tables_dict[examples_dict[q_id]['context']])
     # interpreter.interactive(assisted=True)
@@ -409,3 +428,4 @@ if __name__ == '__main__':
     # run_sample()
     main()
     # sanity_check()
+

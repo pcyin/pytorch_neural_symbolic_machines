@@ -235,6 +235,8 @@ class Actor(Process):
         config = self.config
         epoch_id = 0
         env_dict = {env.name: env for env in self.environments}
+        sample_method = self.config['sample_method']
+        assert sample_method in ('sample', 'beam_search')
 
         with torch.no_grad():
             while True:
@@ -245,9 +247,15 @@ class Actor(Process):
                     print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}', file=sys.stderr)
                     # perform sampling
                     t1 = time.time()
-                    explore_samples = self.agent.sample(batched_envs,
-                                                        sample_num=config['n_explore_samples'],
-                                                        use_cache=config['use_cache'])
+                    if sample_method == 'sample':
+                        explore_samples = self.agent.sample(batched_envs,
+                                                            sample_num=config['n_explore_samples'],
+                                                            use_cache=config['use_cache'])
+                    else:
+                        explore_samples = self.agent.new_beam_search(batched_envs,
+                                                                     beam_size=config['n_explore_samples'],
+                                                                     use_cache=config['use_cache'],
+                                                                     return_list=True)
                     t2 = time.time()
                     print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, sampled {len(explore_samples)} trajectories (took {t2 - t1}s)', file=sys.stderr)
 

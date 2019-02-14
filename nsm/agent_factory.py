@@ -35,7 +35,7 @@ class Sample(object):
         return self
 
     def __repr__(self):
-        return 'Sample(%s, prob=%f)'.format(self.trajectory, self.prob)
+        return 'Sample({}, prob={})'.format(self.trajectory, self.prob)
 
     __str__ = __repr__
 
@@ -562,7 +562,7 @@ class PGAgent(nn.Module):
 
         return traj_log_prob
 
-    def sample(self, environments, sample_num, use_cache=False):
+    def sample_gpu(self, environments, sample_num, use_cache=False):
         if use_cache:
             # if already explored everything, then don't explore this environment anymore.
             environments = [env for env in environments if not env.cache.is_full()]
@@ -609,6 +609,7 @@ class PGAgent(nn.Module):
                     observations_t.append(observations_tm1[env_id])
 
             sample_probs = sample_probs + sampled_action_t_prob
+            # print(sample_probs)
 
             if new_active_env_ids:
                 # context_encoding = nn_util.dict_index_select(context_encoding, active_env_ids)
@@ -628,7 +629,85 @@ class PGAgent(nn.Module):
 
         return samples
 
-    def new_beam_search(self, environments, beam_size, use_cache=False):
+    def sample(self, environments, sample_num, use_cache=False):
+        if use_cache:
+            # if already explored everything, then don't explore this environment anymore.
+            environments = [env for env in environments if not env.cache.is_full()]
+
+        duplicated_envs = []
+        for env in environments:
+            for i in range(sample_num):
+                duplicated_envs.append(env.clone())
+
+        environments = duplicated_envs
+        for env in environments:
+            env.use_cache = use_cache
+
+        completed_envs = []
+        active_envs = environments
+
+        env_context = [env.get_context() for env in environments]
+        context_encoding = self.encode(env_context)
+
+        observations_tm1 = [env.start_ob for env in environments]
+        state_tm1 = self.decoder.get_initial_state(context_encoding)
+        sample_probs = torch.zeros(len(environments), device=self.device)
+
+        while True:
+            batched_ob_tm1 = Observation.to_batched_input(observations_tm1, memory_size=self.memory_size).to(self.device)
+            mem_logits, state_t = self.decoder.step(observations_tm1, state_tm1, context_encoding=context_encoding)
+
+            # (batch_size)
+            sampled_action_t_id, sampled_action_t_prob = self.sample_action(mem_logits, batched_ob_tm1.valid_action_mask,
+                                                                            return_log_prob=True)
+
+            sample_probs = sample_probs + sampled_action_t_prob
+
+            # print(sample_probs)
+
+            observations_t = []
+            new_active_env_pos = []
+            new_active_envs = []
+            has_completed_sample = []
+            for env_id, (env, action_t) in enumerate(zip(active_envs, sampled_action_t_id.tolist())):
+                action_rel_id = env.valid_actions.index(action_t)
+                ob_t, _, _, info = env.step(action_rel_id)
+                if env.done:
+                    completed_envs.append((env, sample_probs[env_id].item()))
+                    has_completed_sample = True
+                else:
+                    # if the ob_t.valid_action_indices is empty, then the environment will terminate automatically,
+                    # so these is not need to check if this field is empty.
+                    observations_t.append(ob_t)
+                    new_active_env_pos.append(env_id)
+                    new_active_envs.append(env)
+
+            if not new_active_env_pos:
+                break
+
+            if has_completed_sample:
+                # need to perform slicing
+                context_encoding['question_encoding'] = context_encoding['question_encoding'][new_active_env_pos]
+                context_encoding['question_mask'] = context_encoding['question_mask'][new_active_env_pos]
+                context_encoding['question_encoding_att_linear'] = context_encoding['question_encoding_att_linear'][new_active_env_pos]
+
+                state_tm1 = state_t[new_active_env_pos]
+                sample_probs = sample_probs[new_active_env_pos]
+            else:
+                state_tm1 = state_t
+
+            observations_tm1 = observations_t
+            active_envs = new_active_envs
+
+        samples = []
+        for env_id, (env, prob) in enumerate(completed_envs):
+            if not env.error:
+                traj = Trajectory.from_environment(env)
+                samples.append(Sample(trajectory=traj, prob=prob))
+
+        return samples
+
+    def new_beam_search(self, environments, beam_size, use_cache=False, return_list=False):
         # if already explored everything, then don't explore this environment anymore.
         if use_cache:
             # if already explored everything, then don't explore this environment anymore.
@@ -734,13 +813,21 @@ class PGAgent(nn.Module):
 
             beams = new_beams
 
-        # rank completed hypothesis
-        for env_name in completed_hyps.keys():
-            sorted_hyps = sorted(completed_hyps[env_name], key=lambda hyp: hyp.score, reverse=True)[:beam_size]
-            completed_hyps[env_name] = [Sample(trajectory=Trajectory.from_environment(hyp.env), prob=hyp.score) for
-                                        hyp in sorted_hyps]
+        if not return_list:
+            # rank completed hypothesis
+            for env_name in completed_hyps.keys():
+                sorted_hyps = sorted(completed_hyps[env_name], key=lambda hyp: hyp.score, reverse=True)[:beam_size]
+                completed_hyps[env_name] = [Sample(trajectory=Trajectory.from_environment(hyp.env), prob=hyp.score) for
+                                            hyp in sorted_hyps]
 
-        return completed_hyps
+            return completed_hyps
+        else:
+            samples_list = []
+            for _hyps in completed_hyps.values():
+                samples = [Sample(trajectory=Trajectory.from_environment(hyp.env), prob=hyp.score) for hyp in _hyps]
+                samples_list.extend(samples)
+
+            return samples_list
 
     def beam_search(self, environments, beam_size, use_cache=False):
         # if already explored everything, then don't explore this environment anymore.
