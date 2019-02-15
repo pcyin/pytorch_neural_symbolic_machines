@@ -3,6 +3,7 @@ import heapq
 import os
 import random
 import time
+from itertools import chain
 from typing import List
 
 import numpy as np
@@ -53,6 +54,13 @@ class Learner(Process):
         torch.nn.init.zeros_(model.decoder.output_feature_linear.weight)
         torch.nn.init.normal_(model.encoder.context_embedder.trainable_embedding.weight, mean=0., std=0.1)
         torch.nn.init.normal_(model.decoder.builtin_func_embeddings.weight, mean=0., std=0.1)
+
+        # set forget gate bias to 1, as in tensorflow
+        for name, p in chain(model.decoder.rnn_cell.named_parameters(), model.encoder.lstm_encoder.named_parameters()):
+            if 'bias' in name:
+                n = p.size(0)
+                forget_start_idx, forget_end_idx = n // 4, n // 2
+                p.data[forget_start_idx:forget_end_idx].fill_(1.)
 
         while True:
             train_iter += 1
