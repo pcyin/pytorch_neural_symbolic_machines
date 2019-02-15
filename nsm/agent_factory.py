@@ -68,6 +68,7 @@ class Encoder(nn.Module):
         self.lstm_encoder = nn.LSTM(input_size=context_embedder.embed_size + question_feat_size,
                                     hidden_size=hidden_size, num_layers=num_layers,
                                     batch_first=True, bidirectional=True, dropout=dropout)
+        self.dropout = nn.Dropout(dropout)
 
         if output_proj_size > 0:
             self.output_proj_linear = nn.Linear(hidden_size * 2, hidden_size, bias=True)
@@ -186,8 +187,14 @@ class Encoder(nn.Module):
 
         sorted_question_encodings, (last_states, last_cells) = self.lstm_encoder(packed_question_embedding)
         sorted_question_encodings, _ = pad_packed_sequence(sorted_question_encodings, batch_first=True)
+
+        # (num_layers, direction_num, batch_size, hidden_size)
         last_states = last_states.view(self.lstm_encoder.num_layers, 2, -1, self.lstm_encoder.hidden_size)
         last_cells = last_cells.view(self.lstm_encoder.num_layers, 2, -1, self.lstm_encoder.hidden_size)
+
+        # apply residual connection and dropout to the last layer
+        # (batch_size, seq_len, hidden_size * 2)
+        sorted_question_encodings = self.dropout(sorted_question_encodings)
 
         # (batch_size, hidden_size)
         # concatenate forward and backward cell
@@ -258,6 +265,8 @@ class MultiLayerDropoutLSTMCell(RNNCellBase):
             else:
                 o_i = h_i
 
+            o_i = self.dropout(o_i)
+
             s_i = (h_i, c_i)
             state.append(s_i)
 
@@ -274,6 +283,7 @@ class Decoder(nn.Module):
                  num_layers, output_feature_num,
                  builtin_func_num,
                  memory_size,
+                 att_type='dot_prod',
                  dropout=0.):
         super(Decoder, self).__init__()
 
@@ -285,6 +295,14 @@ class Decoder(nn.Module):
                                                   num_layers=num_layers, dropout=dropout)
 
         self.att_vec_linear = nn.Linear(encoder_hidden_size + hidden_size, hidden_size, bias=False)
+
+        if att_type == 'dot_prod':
+            self.attention_func = self.dot_prod_attention
+        if att_type == 'bahdanau':
+            self.att_l2_linear = nn.Linear(hidden_size, 1, bias=False)
+            self.query_proj_linear = nn.Linear(hidden_size, hidden_size, bias=True)
+
+            self.attention_func = self.bahdanau_attention
 
         self.constant_value_embedding_linear = nn.Linear(constant_value_embed_size, mem_item_embed_size)
 
@@ -366,14 +384,14 @@ class Decoder(nn.Module):
         inner_output_t, inner_state_t = self.rnn_cell(input_mem_entry, state_tm1.state)
 
         # attention over context
-        ctx_t, alpha_t = self.dot_prod_attention(inner_output_t,
-                                                 context_encoding['question_encoding'],
-                                                 context_encoding['question_encoding_att_linear'],
-                                                 context_encoding['question_mask'])
+        ctx_t, alpha_t = self.attention_func(query=inner_output_t,
+                                             keys=context_encoding['question_encoding_att_linear'],
+                                             values=context_encoding['question_encoding'],
+                                             entry_masks=context_encoding['question_mask'])
 
         # (batch_size, hidden_size)
         att_t = torch.tanh(self.att_vec_linear(torch.cat([inner_output_t, ctx_t], 1)))  # E.q. (5)
-        att_t = self.dropout(att_t)
+        # att_t = self.dropout(att_t)
 
         # compute scores over valid memory entries
         # memory is organized by:
@@ -413,22 +431,39 @@ class Decoder(nn.Module):
 
         return action_score_t, state_t
 
-    def dot_prod_attention(self, h_t: torch.Tensor,
-                           src_encoding: torch.Tensor, src_encoding_att_linear: torch.Tensor,
-                           mask: torch.Tensor=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def bahdanau_attention(self, query, keys, values, entry_masks):
+        query = self.query_proj_linear(query)
         # (batch_size, src_sent_len)
-        att_weight = torch.bmm(src_encoding_att_linear, h_t.unsqueeze(2)).squeeze(2)
+        att_weight = self.att_l2_linear(torch.tanh(query.unsqueeze(1) + keys)).squeeze(-1)
 
-        if mask is not None:
-            att_weight.data.masked_fill_((1.0 - mask).byte(), -float('inf'))
+        if entry_masks is not None:
+            att_weight.data.masked_fill_((1.0 - entry_masks).byte(), -float('inf'))
 
-        softmaxed_att_weight = F.softmax(att_weight, dim=-1)
+        att_prob = F.softmax(att_weight, dim=-1)
 
         att_view = (att_weight.size(0), 1, att_weight.size(1))
         # (batch_size, hidden_size)
-        ctx_vec = torch.bmm(softmaxed_att_weight.view(*att_view), src_encoding).squeeze(1)
+        ctx_vec = torch.bmm(att_prob.view(*att_view), values).squeeze(1)
 
-        return ctx_vec, softmaxed_att_weight
+        return ctx_vec, att_prob
+
+    def dot_prod_attention(self, query: torch.Tensor,
+                           keys: torch.Tensor,
+                           values: torch.Tensor,
+                           entry_masks: torch.Tensor=None) -> Tuple[torch.Tensor, torch.Tensor]:
+        # (batch_size, src_sent_len)
+        att_weight = torch.bmm(keys, query.unsqueeze(2)).squeeze(2)
+
+        if entry_masks is not None:
+            att_weight.data.masked_fill_((1.0 - entry_masks).byte(), -float('inf'))
+
+        att_prob = F.softmax(att_weight, dim=-1)
+
+        att_view = (att_weight.size(0), 1, att_weight.size(1))
+        # (batch_size, hidden_size)
+        ctx_vec = torch.bmm(att_prob.view(*att_view), values).squeeze(1)
+
+        return ctx_vec, att_prob
 
     @staticmethod
     def build(config):
@@ -440,6 +475,7 @@ class Decoder(nn.Module):
                        output_feature_num=config['n_de_output_features'],
                        builtin_func_num=config['builtin_func_num'],
                        memory_size=config['memory_size'],
+                       att_type=config['attention_type'],
                        dropout=config['dropout'])
 
 
