@@ -50,6 +50,8 @@ class Learner(Process):
         cum_loss = cum_examples = 0.
         t1 = time.time()
 
+        max_batch_size = self.config['batch_size'] * (self.config['n_replay_samples'] + self.config['n_policy_samples'])
+
         nn_util.glorot_init(params)
         torch.nn.init.zeros_(model.decoder.output_feature_linear.weight)
         torch.nn.init.normal_(model.encoder.context_embedder.trainable_embedding.weight, mean=0., std=0.1)
@@ -75,7 +77,8 @@ class Learner(Process):
             train_sample_weights = batch_log_prob.new_tensor([s.prob for s in train_samples])
             batch_log_prob = batch_log_prob * train_sample_weights
 
-            loss = -batch_log_prob.mean()
+            # loss = -batch_log_prob.mean()
+            loss = -batch_log_prob.sum() / max_batch_size
 
             if entropy_reg_weight != 0.:
                 entropy = entropy.mean()
