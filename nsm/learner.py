@@ -64,6 +64,9 @@ class Learner(Process):
             # (batch_size)
             batch_log_prob, entropy = self.agent(train_trajectories, entropy=True)
 
+            train_sample_weights = batch_log_prob.new_tensor([s.prob for s in train_samples])
+            batch_log_prob = batch_log_prob * train_sample_weights
+
             loss = -batch_log_prob.mean()
 
             if entropy_reg_weight != 0.:
@@ -84,7 +87,7 @@ class Learner(Process):
 
             # print(f'[Learner] train_iter={train_iter} loss={loss_val}', file=sys.stderr)
             del loss
-            if entropy_reg_weight: del entropy
+            if entropy_reg_weight != 0.: del entropy
 
             summary_writer.add_scalar('train_loss', loss_val, train_iter)
             cum_loss += loss_val * len(train_samples)

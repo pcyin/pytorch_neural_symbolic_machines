@@ -19,8 +19,10 @@ import torch
 
 
 def normalize_probs(p_list):
-    p_sum = sum(p_list)
-    return [p / p_sum for p in p_list]
+    smoothing = 1.e-8
+    p_list = np.array(p_list) + smoothing
+
+    return p_list / p_list.sum()
 
 
 def load_programs_to_buffer(envs, replay_buffer, saved_programs_file_path):
@@ -102,7 +104,10 @@ class AllGoodReplayBuffer(object):
         return n
 
     def add_trajectory(self, trajectory: Trajectory):
-        program = self.de_vocab.lookup(trajectory.tgt_action_ids, reverse=True)
+        program = trajectory.program
+        if not program:
+            program = self.de_vocab.lookup(trajectory.tgt_action_ids, reverse=True)
+
         program_str = ' '.join(program)
 
         self.program_prob_dict.setdefault(trajectory.environment_name, dict())[program_str] = True
@@ -188,6 +193,8 @@ class AllGoodReplayBuffer(object):
                 selected_sample_indices = np.random.choice(len(samples), n_samples, p=p_samples)
 
                 selected_samples = [samples[i] for i in selected_sample_indices]
+                selected_samples = [Sample(trajectory=sample.trajectory, prob=1. / n_samples) for sample in selected_samples]
+
                 replay_samples += selected_samples
 
         return replay_samples
@@ -236,7 +243,9 @@ class Actor(Process):
         epoch_id = 0
         env_dict = {env.name: env for env in self.environments}
         sample_method = self.config['sample_method']
+        method = self.config['method']
         assert sample_method in ('sample', 'beam_search')
+        assert method in ('sample', 'mapo')
 
         with torch.no_grad():
             while True:
@@ -261,10 +270,10 @@ class Actor(Process):
 
                     # retain samples with high reward
                     good_explore_samples = [sample for sample in explore_samples if sample.trajectory.reward == 1.]
-                    for sample in good_explore_samples:
-                        print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, '
-                              f'add 1 traj [{sample.trajectory}] for env [{sample.trajectory.environment_name}] to buffer',
-                              file=sys.stderr)
+                    # for sample in good_explore_samples:
+                    #     print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, '
+                    #           f'add 1 traj [{sample.trajectory}] for env [{sample.trajectory.environment_name}] to buffer',
+                    #           file=sys.stderr)
                     self.replay_buffer.save_samples(good_explore_samples)
 
                     # sample replay examples from the replay buffer
@@ -275,8 +284,37 @@ class Actor(Process):
                     print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, got {len(replay_samples)} replay samples',
                           file=sys.stderr)
 
-                    if replay_samples:
-                        self.train_queue.put(replay_samples)
+                    if method == 'mapo':
+                        train_examples = []
+                        for sample in replay_samples:
+                            sample_weight = self.replay_buffer.prob_sum_dict.get(sample.trajectory.environment_name, 0.)
+                            sample_weight = max(sample_weight, self.config['min_replay_samples_weight'])
+
+                            sample.prob = sample_weight * sample.prob
+                            train_examples.append(sample)
+
+                        on_policy_samples = self.agent.sample(batched_envs,
+                                                              sample_num=config['n_policy_samples'],
+                                                              use_cache=False)
+                        non_replay_samples = [sample for sample in on_policy_samples
+                                              if sample.trajectory.reward == 1. and not self.replay_buffer.contains(sample.trajectory)]
+                        self.replay_buffer.save_samples(non_replay_samples)
+
+                        for sample in non_replay_samples:
+                            replay_samples_prob = self.replay_buffer.prob_sum_dict.get(sample.trajectory.environment_name, 0.)
+                            if replay_samples_prob > 0.:
+                                # clip the sum of probabilities for replay samples if the replay buffer is not empty
+                                replay_samples_prob = max(replay_samples_prob, self.config['min_replay_samples_weight'])
+
+                            sample_weight = 1. - replay_samples_prob
+
+                            sample.prob = sample_weight / len(on_policy_samples)
+                            train_examples.append(sample)
+                    else:
+                        train_examples = replay_samples
+
+                    if train_examples:
+                        self.train_queue.put(train_examples)
 
                     self.check_and_load_new_model()
 
