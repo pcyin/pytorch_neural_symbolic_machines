@@ -103,7 +103,7 @@ def wikisql_score(prediction, answer):
 def wtq_score(prediction, answer):
     processed_answer = evaluator.target_values_map(*answer)
     correct = evaluator.check_prediction(
-      [p for p in prediction], processed_answer)
+      [str(p) for p in prediction], processed_answer)
     if correct:
         return 1.0
     else:
