@@ -45,6 +45,7 @@ def load_programs_to_buffer(envs, replay_buffer, saved_programs_file_path):
                     traj = Trajectory.from_program(env, program)
                 except ValueError:
                     print(f'Error loading program {program} for env {env.name}', file=sys.stderr)
+                    continue
 
                 if traj is not None:
                     trajectories.append(traj)
@@ -235,6 +236,7 @@ class Actor(Process):
 
         if self.config['load_saved_programs']:
             load_programs_to_buffer(self.environments, self.replay_buffer, self.config['saved_program_file'])
+            print(f'[Actor {self.actor_id}] loaded {self.replay_buffer.size} programs to buffer', file=sys.stderr)
 
         self.train()
 
@@ -277,13 +279,15 @@ class Actor(Process):
                     self.replay_buffer.save_samples(good_explore_samples)
 
                     # sample replay examples from the replay buffer
+                    t1 = time.time()
                     replay_samples = self.replay_buffer.replay(batched_envs,
                                                                n_samples=config['n_replay_samples'],
                                                                use_top_k=config['use_top_k_replay_samples'])
-
-                    print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, got {len(replay_samples)} replay samples',
+                    t2 = time.time()
+                    print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, got {len(replay_samples)} replay samples (took {t2 - t1}s)',
                           file=sys.stderr)
 
+                    samples_info = dict()
                     if method == 'mapo':
                         train_examples = []
                         for sample in replay_samples:
@@ -308,13 +312,24 @@ class Actor(Process):
 
                             sample_weight = 1. - replay_samples_prob
 
-                            sample.prob = sample_weight / len(on_policy_samples)
+                            sample.prob = sample_weight * 1. / config['n_policy_samples']
                             train_examples.append(sample)
+
+                        n_clip = 0
+                        for env in batched_envs:
+                            name = env.name
+                            if (name in self.replay_buffer.prob_sum_dict and
+                                    self.replay_buffer.prob_sum_dict[name] < self.config['min_replay_samples_weight']):
+                                n_clip += 1
+                        clip_frac = n_clip / len(batched_envs)
+
+                        train_examples = train_examples
+                        samples_info['clip_frac'] = clip_frac
                     else:
                         train_examples = replay_samples
 
                     if train_examples:
-                        self.train_queue.put(train_examples)
+                        self.train_queue.put((train_examples, samples_info))
 
                     self.check_and_load_new_model()
 

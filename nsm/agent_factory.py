@@ -188,32 +188,37 @@ class Encoder(nn.Module):
         sorted_question_encodings, (last_states, last_cells) = self.lstm_encoder(packed_question_embedding)
         sorted_question_encodings, _ = pad_packed_sequence(sorted_question_encodings, batch_first=True)
 
-        # (num_layers, direction_num, batch_size, hidden_size)
-        last_states = last_states.view(self.lstm_encoder.num_layers, 2, -1, self.lstm_encoder.hidden_size)
-        last_cells = last_cells.view(self.lstm_encoder.num_layers, 2, -1, self.lstm_encoder.hidden_size)
-
-        # apply residual connection and dropout to the last layer
+        # apply dropout to the last layer
         # (batch_size, seq_len, hidden_size * 2)
         sorted_question_encodings = self.dropout(sorted_question_encodings)
 
+        # (batch_size, question_len, hidden_size * 2)
+        question_encodings = sorted_question_encodings.index_select(dim=0, index=restoration_indices)
+
+        # (num_layers, direction_num, batch_size, hidden_size)
+        last_states = last_states.view(self.lstm_encoder.num_layers, 2, -1, self.lstm_encoder.hidden_size)
+        last_states = last_states.index_select(dim=2, index=restoration_indices)
+        last_cells = last_cells.view(self.lstm_encoder.num_layers, 2, -1, self.lstm_encoder.hidden_size)
+        last_cells = last_cells.index_select(dim=2, index=restoration_indices)
+
         # (batch_size, hidden_size)
         # concatenate forward and backward cell
-        encoder_last_states = []
+        encoder_last_forward_states = []
+        encoder_last_backward_states = []
         for i in range(self.lstm_encoder.num_layers):
             last_fwd_cell_i = last_cells[i, 0]
             last_bak_cell_i = last_cells[i, 1]
-            last_cell_i = torch.cat([last_fwd_cell_i, last_bak_cell_i], dim=-1)
-            last_cell_i = last_cell_i.index_select(dim=0, index=restoration_indices)
+            # last_cell_i = torch.cat([last_fwd_cell_i, last_bak_cell_i], dim=-1)
 
             last_fwd_state_i = last_states[i, 0]
             last_bak_state_i = last_states[i, 1]
-            last_state_i = torch.cat([last_fwd_state_i, last_bak_state_i], dim=-1)
-            last_state_i = last_state_i.index_select(dim=0, index=restoration_indices)
+            # last_state_i = torch.cat([last_fwd_state_i, last_bak_state_i], dim=-1)
 
-            encoder_last_states.append((last_state_i, last_cell_i))
+            # encoder_last_states.append((last_state_i, last_cell_i))
+            encoder_last_forward_states.append((last_fwd_state_i, last_fwd_cell_i))
+            encoder_last_backward_states.append((last_bak_state_i, last_bak_cell_i))
 
-        # (batch_size, question_len, encoding_size)
-        question_encodings = sorted_question_encodings.index_select(dim=0, index=restoration_indices)
+        encoder_last_states = (encoder_last_forward_states, encoder_last_backward_states)
 
         if hasattr(self, 'output_proj_linear'):
             question_encodings = self.output_proj_linear(question_encodings)
@@ -355,12 +360,15 @@ class Decoder(nn.Module):
         initial_memory = torch.cat([builtin_func_embedding, constant_embedding], dim=1)[:, :self.memory_size]
 
         encoder_last_states = context_encoding['encoder_last_states']
-        decoder_init_states = []
-        for i in range(len(encoder_last_states)):
-            h_0_i, c_0_i = encoder_last_states[i]
-            sc_0_i = self.decoder_cell_init_linear(c_0_i)
-            sh_0_i = torch.tanh(sc_0_i)
-            decoder_init_states.append((sh_0_i, sc_0_i))
+
+        # for i in range(len(encoder_last_states)):
+        #     h_0_i, c_0_i = encoder_last_states[i]
+        #     sc_0_i = self.decoder_cell_init_linear(c_0_i)
+        #     sh_0_i = torch.tanh(sc_0_i)
+        #     decoder_init_states.append((sh_0_i, sc_0_i))
+
+        # using forward encoder state to initialize decoder
+        decoder_init_states = encoder_last_states[0]
 
         state = DecoderState(state=decoder_init_states, memory=initial_memory)
 
@@ -390,7 +398,7 @@ class Decoder(nn.Module):
                                              entry_masks=context_encoding['question_mask'])
 
         # (batch_size, hidden_size)
-        att_t = torch.tanh(self.att_vec_linear(torch.cat([inner_output_t, ctx_t], 1)))  # E.q. (5)
+        att_t = self.att_vec_linear(torch.cat([inner_output_t, ctx_t], 1))  # E.q. (5)
         # att_t = self.dropout(att_t)
 
         # compute scores over valid memory entries
@@ -416,8 +424,8 @@ class Decoder(nn.Module):
         write_value = att_t * write_mask.unsqueeze(-1)
 
         # write to memory
-        memory_t = state_tm1.memory.clone()
-        memory_t.scatter_add_(1, write_ind.view(-1, 1, 1).expand(-1, -1, memory_t.size(-1)), write_value.unsqueeze(1))
+        memory_tm1 = state_tm1.memory
+        memory_t = memory_tm1.scatter_add(1, write_ind.view(-1, 1, 1).expand(-1, -1, memory_tm1.size(-1)), write_value.unsqueeze(1))
 
         state_t = DecoderState(state=inner_state_t, memory=memory_t)
 

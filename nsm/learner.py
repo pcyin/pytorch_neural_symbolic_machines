@@ -68,7 +68,14 @@ class Learner(Process):
             train_iter += 1
             optimizer.zero_grad()
 
-            train_samples = self.train_queue.get()
+            train_samples, samples_info = self.train_queue.get()
+            try:
+                queue_size = self.train_queue.qsize()
+                # print(f'[Learner] train_iter={train_iter} train queue size={queue_size}', file=sys.stderr)
+                summary_writer.add_scalar('train_queue_size', queue_size, train_iter)
+            except NotImplementedError:
+                pass
+
             train_trajectories = [sample.trajectory for sample in train_samples]
 
             # (batch_size)
@@ -101,6 +108,9 @@ class Learner(Process):
             if entropy_reg_weight != 0.: del entropy
 
             summary_writer.add_scalar('train_loss', loss_val, train_iter)
+            if 'clip_frac' in samples_info:
+                summary_writer.add_scalar('sample_clip_frac', samples_info['clip_frac'], train_iter)
+
             cum_loss += loss_val * len(train_samples)
             cum_examples += len(train_samples)
 

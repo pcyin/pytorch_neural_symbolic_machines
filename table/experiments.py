@@ -331,7 +331,8 @@ def test(args):
             results[env.name] = []
             for hyp in hyp_list:
                 results[env.name].append(OrderedDict(
-                    program=to_human_readable_program(hyp.trajectory.program, env),
+                    #program=to_human_readable_program(hyp.trajectory.program, env),
+                    program=hyp.trajectory.program,
                     is_correct=hyp.trajectory.reward == 1.,
                     prob=hyp.prob
                 ))
@@ -415,15 +416,22 @@ if __name__ == '__main__':
     # env_dict = {env.name: env for env in envs}
     # env_dict['nt-3035'].interpreter.interactive(assisted=True)
 
-    # examples = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/train_examples.jsonl")
+    # examples = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/data_split_1/dev_split.jsonl")
     # tables = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/tables.jsonl")
-    # # #
+    # # # # #
     # examples_dict = {e['id']: e for e in examples}
     # tables_dict = {tab['name']: tab for tab in tables}
-    # # #
-    # q_id = 'nt-13522'
-    # interpreter = init_interpreter_for_example(examples_dict[q_id], tables_dict[examples_dict[q_id]['context']])
-    # interpreter.interactive(assisted=True)
+    # # # # #
+    # q_id = 'nt-3'
+    # interpreter = init_interpreter_for_example(examples_dict[q_id], tables_dict[examples_dict[q_id]['context']]).clone()
+    # # # interpreter.interactive(assisted=True)
+    # program = ['(', 'argmax', 'all_rows', 'v4', ')', '(', 'hop', 'v8', 'v2', ')', '<END>']
+    # for token in program:
+    #     print(interpreter.valid_tokens())
+    #     interpreter.read_token(token)
+    # # from table.wtq.evaluator import check_prediction
+    # # is_correct = utils.wtq_score([0.4], ['00.4', '0.4'])
+    # # print(is_correct)
 
     # run_sample()
     main()
