@@ -194,7 +194,7 @@ class AllGoodReplayBuffer(object):
                 selected_sample_indices = np.random.choice(len(samples), n_samples, p=p_samples)
 
                 selected_samples = [samples[i] for i in selected_sample_indices]
-                selected_samples = [Sample(trajectory=sample.trajectory, prob=1. / n_samples) for sample in selected_samples]
+                selected_samples = [Sample(trajectory=sample.trajectory, prob=sample.prob) for sample in selected_samples]
 
                 replay_samples += selected_samples
 
@@ -216,8 +216,8 @@ class Actor(Process):
         if not self.shard_ids:
             raise RuntimeError(f'empty shard for Actor {self.actor_id}')
 
-        self.model_path = 'INIT_MODEL'
-        self.message_var = None
+        self.model_path = None
+        self.checkpoint_queue = None
         self.train_queue = None
 
     def run(self):
@@ -247,7 +247,7 @@ class Actor(Process):
         sample_method = self.config['sample_method']
         method = self.config['method']
         assert sample_method in ('sample', 'beam_search')
-        assert method in ('sample', 'mapo')
+        assert method in ('sample', 'mapo', 'mml')
 
         with torch.no_grad():
             while True:
@@ -255,7 +255,7 @@ class Actor(Process):
                 epoch_start = time.time()
                 batch_iter = nn_util.batch_iter(self.environments, batch_size=self.config['batch_size'], shuffle=True)
                 for batch_id, batched_envs in enumerate(batch_iter):
-                    print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}', file=sys.stderr)
+                    # print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}', file=sys.stderr)
                     # perform sampling
                     t1 = time.time()
                     if sample_method == 'sample':
@@ -294,7 +294,7 @@ class Actor(Process):
                             sample_weight = self.replay_buffer.prob_sum_dict.get(sample.trajectory.environment_name, 0.)
                             sample_weight = max(sample_weight, self.config['min_replay_samples_weight'])
 
-                            sample.prob = sample_weight * sample.prob
+                            sample.weight = sample_weight * 1. / config['n_replay_samples']
                             train_examples.append(sample)
 
                         on_policy_samples = self.agent.sample(batched_envs,
@@ -312,7 +312,7 @@ class Actor(Process):
 
                             sample_weight = 1. - replay_samples_prob
 
-                            sample.prob = sample_weight * 1. / config['n_policy_samples']
+                            sample.weight = sample_weight * 1. / config['n_policy_samples']
                             train_examples.append(sample)
 
                         n_clip = 0
@@ -325,11 +325,19 @@ class Actor(Process):
 
                         train_examples = train_examples
                         samples_info['clip_frac'] = clip_frac
+                    elif method == 'mml':
+                        for sample in replay_samples:
+                            sample.weight = sample.prob / self.replay_buffer.prob_sum_dict[sample.trajectory.environment_name]
+                        train_examples = replay_samples
                     else:
                         train_examples = replay_samples
+                        for sample in train_examples:
+                            sample.weight = 1.
 
                     if train_examples:
                         self.train_queue.put((train_examples, samples_info))
+                    else:
+                        continue
 
                     self.check_and_load_new_model()
 
@@ -347,9 +355,14 @@ class Actor(Process):
         setattr(self, 'environments', envs)
 
     def check_and_load_new_model(self):
-        new_model_path = self.message_var.value.decode()
-        # print(f'[Actor {self.actor_id}] current newest model path [{new_model_path}]', file=sys.stderr)
-        if new_model_path and new_model_path != self.model_path:
+        t1 = time.time()
+        while True:
+            new_model_path = self.checkpoint_queue.get()
+            if new_model_path == self.model_path or os.path.exists(new_model_path):
+                break
+        print(f'[Actor {self.actor_id}] {time.time() - t1}s used to wait for new checkpoint', file=sys.stderr)
+
+        if new_model_path != self.model_path:
             t1 = time.time()
 
             state_dict = torch.load(new_model_path, map_location=lambda storage, loc: storage)

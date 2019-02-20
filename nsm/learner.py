@@ -25,9 +25,11 @@ class Learner(Process):
         super(Learner, self).__init__(daemon=True)
 
         self.train_queue = multiprocessing.Queue()
+        self.checkpoint_queue = multiprocessing.Queue()
         self.config = config
         self.gpu_id = gpu_id
         self.actor_message_vars = []
+        self.current_model_path = None
 
     def run(self):
         # create agent
@@ -43,7 +45,6 @@ class Learner(Process):
         save_every_niter = self.config['save_every_niter']
         entropy_reg_weight = self.config['entropy_reg_weight']
         summary_writer = SummaryWriter(os.path.join(self.config['work_dir'], 'tb_log/train'))
-        old_model_path = None
         params = [p for p in model.parameters() if p.requires_grad]
         optimizer = torch.optim.Adam(params, lr=0.001)
 
@@ -81,11 +82,11 @@ class Learner(Process):
             # (batch_size)
             batch_log_prob, entropy = self.agent(train_trajectories, entropy=True)
 
-            train_sample_weights = batch_log_prob.new_tensor([s.prob for s in train_samples])
+            train_sample_weights = batch_log_prob.new_tensor([s.weight for s in train_samples])
             batch_log_prob = batch_log_prob * train_sample_weights
 
-            # loss = -batch_log_prob.mean()
-            loss = -batch_log_prob.sum() / max_batch_size
+            loss = -batch_log_prob.mean()
+            # loss = -batch_log_prob.sum() / max_batch_size
 
             if entropy_reg_weight != 0.:
                 entropy = entropy.mean()
@@ -114,40 +115,39 @@ class Learner(Process):
             cum_loss += loss_val * len(train_samples)
             cum_examples += len(train_samples)
 
-            if train_iter > 0 and train_iter % save_every_niter == 0:
+            if train_iter % save_every_niter == 0:
                 print(f'[Learner] train_iter={train_iter} avg. loss={cum_loss / cum_examples}, '
                       f'{cum_examples} examples ({cum_examples / (time.time() - t1)} examples/s)', file=sys.stderr)
                 cum_loss = cum_examples = 0.
                 t1 = time.time()
 
-                model_state = model.state_dict()
-                model_save_path = os.path.join(self.config['work_dir'], 'agent_state.iter%d.bin' % train_iter)
-                torch.save(model_state, model_save_path)
+                self.update_model_to_actors(train_iter)
+            else:
+                self.push_new_model(self.current_model_path)
 
-                self.push_new_model(model_save_path)
+    def update_model_to_actors(self, train_iter):
+        t1 = time.time()
+        model_state = self.agent.state_dict()
+        model_save_path = os.path.join(self.config['work_dir'], 'agent_state.iter%d.bin' % train_iter)
+        torch.save(model_state, model_save_path)
 
-                if old_model_path:
-                    os.remove(old_model_path)
-                old_model_path = model_save_path
+        self.push_new_model(model_save_path)
+        print(f'[Learner] pushed model [{model_save_path}] (took {time.time() - t1}s)', file=sys.stderr)
+
+        if self.current_model_path:
+            os.remove(self.current_model_path)
+        self.current_model_path = model_save_path
 
     def push_new_model(self, model_path):
-        t1 = time.time()
-        for msg_val in self.actor_message_vars:
-            msg_val.value = model_path.encode()
-
-        t2 = time.time()
-
-        print('[Learner] pushed model [%s] (took %d s)' % (model_path, t2 - t1), file=sys.stderr)
+        self.checkpoint_queue.put(model_path)
+        if model_path:
+            self.eval_msg_val.value = model_path.encode()
 
     def register_actor(self, actor):
-        msg_var = multiprocessing.Array(ctypes.c_char, 4096)
-        self.actor_message_vars.append(msg_var)
-
-        actor.message_var = msg_var
+        actor.checkpoint_queue = self.checkpoint_queue
         actor.train_queue = self.train_queue
 
     def register_evaluator(self, evaluator):
         msg_var = multiprocessing.Array(ctypes.c_char, 4096)
-        self.actor_message_vars.append(msg_var)
-
+        self.eval_msg_val = msg_var
         evaluator.message_var = msg_var
