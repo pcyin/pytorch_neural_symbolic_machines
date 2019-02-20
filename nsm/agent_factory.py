@@ -361,14 +361,16 @@ class Decoder(nn.Module):
 
         encoder_last_states = context_encoding['encoder_last_states']
 
-        # for i in range(len(encoder_last_states)):
-        #     h_0_i, c_0_i = encoder_last_states[i]
-        #     sc_0_i = self.decoder_cell_init_linear(c_0_i)
-        #     sh_0_i = torch.tanh(sc_0_i)
-        #     decoder_init_states.append((sh_0_i, sc_0_i))
+        decoder_init_states = []
+        for i in range(len(encoder_last_states[0])):
+            (fwd_h_i, fwd_c_i), (bak_h_i, bak_c_i) = encoder_last_states[0][i], encoder_last_states[1][i]
+            c_i = torch.cat([fwd_c_i, bak_c_i], dim=-1)
+            sc_0_i = self.decoder_cell_init_linear(c_i)
+            sh_0_i = torch.tanh(sc_0_i)
+            decoder_init_states.append((sh_0_i, sc_0_i))
 
-        # using forward encoder state to initialize decoder
-        decoder_init_states = encoder_last_states[0]
+        # # using forward encoder state to initialize decoder
+        # decoder_init_states = encoder_last_states[0]
 
         state = DecoderState(state=decoder_init_states, memory=initial_memory)
 
@@ -398,7 +400,7 @@ class Decoder(nn.Module):
                                              entry_masks=context_encoding['question_mask'])
 
         # (batch_size, hidden_size)
-        att_t = self.att_vec_linear(torch.cat([inner_output_t, ctx_t], 1))  # E.q. (5)
+        att_t = torch.tanh(self.att_vec_linear(torch.cat([inner_output_t, ctx_t], 1)))  # E.q. (5)
         # att_t = self.dropout(att_t)
 
         # compute scores over valid memory entries
@@ -701,9 +703,18 @@ class PGAgent(nn.Module):
             batched_ob_tm1 = Observation.to_batched_input(observations_tm1, memory_size=self.memory_size).to(self.device)
             mem_logits, state_t = self.decoder.step(observations_tm1, state_tm1, context_encoding=context_encoding)
 
+            # try:
             # (batch_size)
             sampled_action_t_id, sampled_action_t_prob = self.sample_action(mem_logits, batched_ob_tm1.valid_action_mask,
                                                                             return_log_prob=True)
+            # except RuntimeError:
+            #     for ob in observations_tm1:
+            #         print(f'Observation {ob}', file=sys.stderr)
+            #         print(ob.valid_action_indices, file=sys.stderr)
+            #
+            #     print(batched_ob_tm1.valid_action_mask, file=sys.stderr)
+            #     torch.save((mem_logits, batched_ob_tm1.valid_action_mask), 'tmp.bin')
+            #     exit(-1)
 
             sample_probs = sample_probs + sampled_action_t_prob
 
@@ -712,7 +723,7 @@ class PGAgent(nn.Module):
             observations_t = []
             new_active_env_pos = []
             new_active_envs = []
-            has_completed_sample = []
+            has_completed_sample = False
             for env_id, (env, action_t) in enumerate(zip(active_envs, sampled_action_t_id.tolist())):
                 action_rel_id = env.valid_actions.index(action_t)
                 ob_t, _, _, info = env.step(action_rel_id)
@@ -1024,7 +1035,9 @@ class PGAgent(nn.Module):
         valid_action_mask: (batch_size, action_num)
         """
 
-        p_actions = nn_util.masked_softmax(logits, mask=valid_action_mask)
+        # p_actions = nn_util.masked_softmax(logits, mask=valid_action_mask)
+        logits.masked_fill_((1 - valid_action_mask).byte(), -math.inf)
+        p_actions = F.softmax(logits, dim=-1)
         # (batch_size, 1)
         sampled_actions = torch.multinomial(p_actions, num_samples=1)
 
