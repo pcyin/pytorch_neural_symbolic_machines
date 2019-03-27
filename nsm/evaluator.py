@@ -16,7 +16,20 @@ import torch
 
 class Evaluation(object):
     @staticmethod
-    def evaluate(dataset: List[QAProgrammingEnv], decoding_results=Union[List[List[Sample]], List[Sample]], verbose=False):
+    def evaluate(model: PGAgent, dataset: List[QAProgrammingEnv], beam_size: int):
+        was_training = model.training
+        model.eval()
+
+        decode_results = model.decode_examples(dataset, beam_size=beam_size)
+        eval_results = Evaluation.evaluate_decode_results(dataset, decode_results)
+
+        if was_training:
+            model.train()
+
+        return eval_results
+
+    @staticmethod
+    def evaluate_decode_results(dataset: List[QAProgrammingEnv], decoding_results=Union[List[List[Sample]], List[Sample]], verbose=False):
         if isinstance(decoding_results[0], Sample):
             decoding_results = [[hyp] for hyp in decoding_results]
 
@@ -64,7 +77,7 @@ class Evaluator(Process):
 
                 decode_results = self.agent.decode_examples(self.environments, beam_size=self.config['beam_size'])
 
-                eval_results = Evaluation.evaluate(self.environments, decode_results)
+                eval_results = Evaluation.evaluate_decode_results(self.environments, decode_results)
 
                 t2 = time.time()
                 print(f'[Evaluator] result={repr(eval_results)}, took {t2 - t1}s', file=sys.stderr)

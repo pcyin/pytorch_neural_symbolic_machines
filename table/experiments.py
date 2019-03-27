@@ -319,25 +319,30 @@ def test(args):
                                            beam_size=beam_size,
                                            batch_size=batch_size)
     assert len(test_envs) == len(decode_results)
-    eval_results = Evaluation.evaluate(test_envs, decode_results)
+    eval_results = Evaluation.evaluate_decode_results(test_envs, decode_results)
     print(eval_results, file=sys.stderr)
 
     save_to = args['--save-decode-to']
     if save_to != 'None':
         print(f'save results to [{save_to}]', file=sys.stderr)
 
-        results = OrderedDict()
-        for env, hyp_list in zip(test_envs, decode_results):
-            results[env.name] = []
-            for hyp in hyp_list:
-                results[env.name].append(OrderedDict(
-                    #program=to_human_readable_program(hyp.trajectory.program, env),
-                    program=hyp.trajectory.program,
-                    is_correct=hyp.trajectory.reward == 1.,
-                    prob=hyp.prob
-                ))
+        results = to_decode_results_dict(decode_results, test_envs)
 
         json.dump(results, open(save_to, 'w'), indent=2)
+
+
+def to_decode_results_dict(decode_results, test_envs):
+    results = OrderedDict()
+    for env, hyp_list in zip(test_envs, decode_results):
+        results[env.name] = []
+        for hyp in hyp_list:
+            results[env.name].append(OrderedDict(
+                # program=to_human_readable_program(hyp.trajectory.program, env),
+                program=hyp.trajectory.program,
+                is_correct=hyp.trajectory.reward == 1.,
+                prob=hyp.prob
+            ))
+    return results
 
 
 def main():
@@ -416,15 +421,15 @@ if __name__ == '__main__':
     # env_dict = {env.name: env for env in envs}
     # env_dict['nt-3035'].interpreter.interactive(assisted=True)
 
-    # examples = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/data_split_1/dev_split.jsonl")
+    # examples = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/data_split_1/train_split.jsonl")
     # tables = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/tables.jsonl")
     # # # # #
     # examples_dict = {e['id']: e for e in examples}
     # tables_dict = {tab['name']: tab for tab in tables}
     # # # # #
-    # q_id = 'nt-3'
+    # q_id = 'nt-3302'
     # interpreter = init_interpreter_for_example(examples_dict[q_id], tables_dict[examples_dict[q_id]['context']]).clone()
-    # # # interpreter.interactive(assisted=True)
+    # interpreter.interactive(assisted=True)
     # program = ['(', 'argmax', 'all_rows', 'v4', ')', '(', 'hop', 'v8', 'v2', ')', '<END>']
     # for token in program:
     #     print(interpreter.valid_tokens())

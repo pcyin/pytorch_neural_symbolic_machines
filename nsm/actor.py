@@ -1,4 +1,5 @@
 import heapq
+import math
 import os
 import random
 import sys
@@ -104,14 +105,14 @@ class AllGoodReplayBuffer(object):
             n += len(v)
         return n
 
-    def add_trajectory(self, trajectory: Trajectory):
+    def add_trajectory(self, trajectory: Trajectory, prob=None):
         program = trajectory.program
         if not program:
             program = self.de_vocab.lookup(trajectory.tgt_action_ids, reverse=True)
 
         program_str = ' '.join(program)
 
-        self.program_prob_dict.setdefault(trajectory.environment_name, dict())[program_str] = True
+        self.program_prob_dict.setdefault(trajectory.environment_name, dict())[program_str] = prob
 
         self._buffer.setdefault(trajectory.environment_name, []).append(trajectory)
 
@@ -119,32 +120,25 @@ class AllGoodReplayBuffer(object):
         for trajectory in trajectories:
             # program_str = ' '.join(trajectory.to_program)
             # if trajectory.reward == 1.:
-            # if not self.contains(trajectory):
-            # print(f'add 1 traj [{trajectory}] for env [{trajectory.environment_name}] to buffer', file=sys.stderr)
-            self.add_trajectory(trajectory)
+            if not self.contains(trajectory):
+                # print(f'add 1 traj [{trajectory}] for env [{trajectory.environment_name}] to buffer', file=sys.stderr)
+                self.add_trajectory(trajectory)
 
-    def save_samples(self, samples: List[Sample]):
-        self.save_trajectories([sample.trajectory for sample in samples])
+    def save_samples(self, samples: List[Sample], log=True):
+        for sample in samples:
+            if not self.contains(sample.trajectory):
+                prob = math.exp(sample.prob) if log else sample.prob
+                self.add_trajectory(sample.trajectory, prob=prob)
 
-    def all_samples(self, envs, agent=None):
-        select_env_names = set([e.name for e in envs])
-        trajs = []
-        # Collect all the trajs for the selected envs.
-        for name in select_env_names:
-            if name in self._buffer:
-                trajs += self._buffer[name]
-        if agent is None:
-            # All traj has the same probability, since it will be
-            # normalized later, we just assign them all as 1.0.
-            probs = [1.0] * len(trajs)
-        else:
-            # Otherwise use the agent to compute the prob for each
-            # traj.
-            probs = agent.compute_probs(trajs)
-        samples = [Sample(traj=t, prob=p) for t, p in zip(trajs, probs)]
+    def all_samples(self, agent=None):
+        samples = dict()
+        for env, trajs in self._buffer.items():
+            prob_dict = self.program_prob_dict[env]
+            samples[env] = [Sample(traj, prob=prob_dict[' '.join(traj.program)]) for traj in trajs]
+
         return samples
 
-    def replay(self, environments, n_samples=1, use_top_k=False, truncate_at_n=0):
+    def replay(self, environments, n_samples=1, use_top_k=False, truncate_at_n=0, replace=True):
         select_env_names = set([e.name for e in environments])
         trajs = []
 
@@ -183,20 +177,28 @@ class AllGoodReplayBuffer(object):
             # Compute the sum of prob of replays in the buffer.
             self.prob_sum_dict[name] = sum([sample.prob for sample in samples])
 
+            for sample in samples:
+                self.program_prob_dict[name][' '.join(sample.trajectory.program)] = sample.prob
+
             if use_top_k:
                 # Select the top k samples weighted by their probs.
                 selected_samples = heapq.nlargest(
                     n_samples, samples, key=lambda s: s.prob)
-                replay_samples += normalize_probs(selected_samples)
+                # replay_samples += normalize_probs(selected_samples)
             else:
                 # Randomly samples according to their probs.
+
                 p_samples = normalize_probs([sample.prob for sample in samples])
-                selected_sample_indices = np.random.choice(len(samples), n_samples, p=p_samples)
+                if replace:
+                    selected_sample_indices = np.random.choice(len(samples), n_samples, p=p_samples)
+                else:
+                    sample_num = min(len(samples), n_samples)
+                    selected_sample_indices = np.random.choice(len(samples), sample_num, p=p_samples, replace=False)
 
                 selected_samples = [samples[i] for i in selected_sample_indices]
-                selected_samples = [Sample(trajectory=sample.trajectory, prob=sample.prob) for sample in selected_samples]
 
-                replay_samples += selected_samples
+            selected_samples = [Sample(trajectory=sample.trajectory, prob=sample.prob) for sample in selected_samples]
+            replay_samples += selected_samples
 
         return replay_samples
 
@@ -282,7 +284,8 @@ class Actor(Process):
                     t1 = time.time()
                     replay_samples = self.replay_buffer.replay(batched_envs,
                                                                n_samples=config['n_replay_samples'],
-                                                               use_top_k=config['use_top_k_replay_samples'])
+                                                               use_top_k=config['use_top_k_replay_samples'],
+                                                               replace=config['replay_sample_with_replacement'])
                     t2 = time.time()
                     print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, got {len(replay_samples)} replay samples (took {t2 - t1}s)',
                           file=sys.stderr)
@@ -343,6 +346,13 @@ class Actor(Process):
 
                 epoch_end = time.time()
                 print(f"[Actor {self.actor_id}] epoch {epoch_id} finished, took {epoch_end - epoch_start}s", file=sys.stderr)
+
+                buffer_content = dict()
+                for env_name, samples in self.replay_buffer.all_samples().items():
+                    buffer_content[env_name] = [dict(program=' '.join(sample.trajectory.program), prob=sample.prob) for sample in samples]
+                buffer_save_path = os.path.join(config['work_dir'], f'replay_buffer_actor{self.actor_id}_epoch{epoch_id}.json')
+                with open(buffer_save_path, 'w') as f:
+                    json.dump(buffer_content, f, indent=2)
 
     def load_environments(self, file_paths):
         from table.experiments import load_environments, create_environments
