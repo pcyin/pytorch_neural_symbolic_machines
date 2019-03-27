@@ -15,6 +15,8 @@ from multiprocessing import Process
 from nsm import nn_util
 from nsm.agent_factory import PGAgent, Sample
 from nsm.env_factory import Trajectory
+from nsm.evaluator import Evaluation
+from nsm.retrainer import Retrainer, load_nearest_neighbors
 
 import torch
 from tensorboardX import SummaryWriter
@@ -43,13 +45,39 @@ class Learner(Process):
         model = self.agent
         train_iter = 0
         save_every_niter = self.config['save_every_niter']
+        method = self.config['method']
         entropy_reg_weight = self.config['entropy_reg_weight']
         summary_writer = SummaryWriter(os.path.join(self.config['work_dir'], 'tb_log/train'))
         params = [p for p in model.parameters() if p.requires_grad]
         optimizer = torch.optim.Adam(params, lr=0.001)
+        config = self.config
+        use_finetune = config['use_finetune']
 
         cum_loss = cum_examples = 0.
         t1 = time.time()
+
+        if use_finetune:
+            from table.experiments import load_environments
+            print(f'load training and dev files for fine-tuning', file=sys.stderr)
+            train_set = load_environments([config['train_file']],
+                                          table_file=config['table_file'],
+                                          vocab_file=config['vocab_file'],
+                                          en_vocab_file=config['en_vocab_file'],
+                                          embedding_file=config['embedding_file'])
+
+            dev_set = load_environments([config['dev_file']],
+                                        table_file=config['table_file'],
+                                        vocab_file=config['vocab_file'],
+                                        en_vocab_file=config['en_vocab_file'],
+                                        embedding_file=config['embedding_file'])
+            for env in dev_set:
+                env.punish_extra_work = False
+                env.use_cache = False
+
+            print(f'load nearest neighbors', file=sys.stderr)
+            nearest_neighbors = load_nearest_neighbors(config['nearest_neighbors_file'])
+
+            retrainer = Retrainer(model, train_set, nearest_neighbors, config)
 
         max_batch_size = self.config['batch_size'] * (self.config['n_replay_samples'] + self.config['n_policy_samples'])
 
@@ -115,6 +143,41 @@ class Learner(Process):
             cum_loss += loss_val * len(train_samples)
             cum_examples += len(train_samples)
 
+            if use_finetune and train_iter >= config['fine_tune_start'] and train_iter % config['fine_tune_every_niter'] == 0:
+                print(f'[FineTune] start iterative fine tuning...', file=sys.stderr)
+                dev_scores = []
+
+                dev_result = Evaluation.evaluate(model, dev_set, beam_size=config['beam_size'])
+                dev_score = dev_result['accuracy']
+
+                print(f'[FineTune] initial dev score={dev_score}', file=sys.stderr)
+                dev_scores.append(dev_score)
+                model_state = model.state_dict()
+                model_state_file = os.path.join(config['work_dir'], 'model.tmp.state.bin')
+                torch.save(model_state, model_state_file)
+
+                for i in range(config['fine_tune_nepoch']):
+                    retrainer.fine_tune()
+
+                    dev_result = Evaluation.evaluate(model, dev_set, beam_size=config['beam_size'])
+                    dev_score = dev_result['accuracy']
+
+                    print(f'[FineTune] Epoch {i} dev score={dev_score}', file=sys.stderr)
+                    sys.stderr.flush()
+                    if dev_score > max(dev_scores):
+                        print(f'save current best model', file=sys.stderr)
+                        model_state = model.state_dict()
+                        torch.save(model_state, model_state_file)
+
+                    dev_scores.append(dev_score)
+
+                # if np.argmax(dev_scores) > 0:
+                print(f'[FineTune] reload best model {np.argmax(dev_scores)}', file=sys.stderr)
+                model_state = torch.load(model_state_file)
+                model.load_state_dict(model_state)
+
+                model.train()
+
             if train_iter % save_every_niter == 0:
                 print(f'[Learner] train_iter={train_iter} avg. loss={cum_loss / cum_examples}, '
                       f'{cum_examples} examples ({cum_examples / (time.time() - t1)} examples/s)', file=sys.stderr)
@@ -151,3 +214,4 @@ class Learner(Process):
         msg_var = multiprocessing.Array(ctypes.c_char, 4096)
         self.eval_msg_val = msg_var
         evaluator.message_var = msg_var
+
