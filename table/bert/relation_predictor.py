@@ -1,3 +1,11 @@
+"""
+BERT relation prediction
+
+Usage:
+    relation_predictor.py train [options]
+    relation_predictor.py test [options] MODEL_FILE DATA_FILE
+"""
+
 import math
 import os
 import sys
@@ -16,21 +24,6 @@ CONFIG_NAME = 'bert_config.json'
 WEIGHTS_NAME = 'pytorch_model.bin'
 MAX_SEQUENCE_LEN = 512
 label_space = {'O': 0, 'I-COLUMN': 1}
-
-
-# class EvaluationResult(dict):
-#     def __init__(self, *args, **kwargs):
-#         super(EvaluationResult, self).__init__(*args, **kwargs)
-#
-#     def __add__(self, other):
-#         for key, val in other.items():
-#             if isinstance(val, list):
-#                 self.setdefault(key, []).extend(val)
-#             else:
-#                 self[key] = self.get(key, 0.) + val
-#
-#     def average(self):
-#         for key, val in
 
 
 def get_examples_eval_results(examples, predictions, target_labels, column_spans, verbose=False):
@@ -249,6 +242,7 @@ def main(args):
             '--lr': 5e-5,
             '--warmup-proportion': 0.1,
             '--train-epochs': 5,
+            '--fix-bert': True,
             '--data-path': '/home/pcyin/datasets/relation_prediction/train.rel_prediction.jsonl',
             '--dev-data-path': '/home/pcyin/datasets/relation_prediction/dev.rel_prediction.jsonl'}
             #'--data-path': '/Users/yinpengcheng/Research/SemanticParsing/WikiSQL/annotated/dev.rel_prediction.small.jsonl',
@@ -292,9 +286,13 @@ def main(args):
     # Prepare optimizer
     param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    if args['--fix-bert']:
+        for param_name, param in param_optimizer:
+            if 'bert.' in param_name:
+                param.requires_grad = False
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay) and p.requires_grad], 'weight_decay': 0.01},
+        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay) and p.requires_grad], 'weight_decay': 0.0}
     ]
 
     train_data = load_dataset(args['--data-path'], tokenizer)
