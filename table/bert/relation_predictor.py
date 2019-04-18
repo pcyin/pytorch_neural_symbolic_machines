@@ -2,8 +2,16 @@
 BERT relation prediction
 
 Usage:
-    relation_predictor.py train [options]
-    relation_predictor.py test [options] MODEL_FILE DATA_FILE
+    relation_predictor.py train [options] CONFIG_FILE
+    relation_predictor.py test [options] MODEL_PATH TEST_FILE_PATH
+
+Options:
+    -h --help                                   Show this screen
+    --no-cuda                                   Do not use GPU
+    --debug                                     Debug mode
+    --seed=<int>                                Seed [default: 0]
+    --work-dir=<dir>                            work dir [default: exp_runs/debug]
+    --extra-config=<str>                        extra config [default: {}]
 """
 
 import math
@@ -16,6 +24,7 @@ import random
 import numpy as np
 import json
 from tqdm import tqdm
+from docopt import docopt
 
 from pytorch_pretrained_bert import BertForTokenClassification, BertTokenizer, BertAdam, PYTORCH_PRETRAINED_BERT_CACHE, \
     BertConfig
@@ -186,7 +195,7 @@ class Example(object):
 def load_dataset(file_path, tokenizer):
     examples = []
     with open(file_path) as f:
-        for line in f:
+        for line in tqdm(f, desc=f'reading {file_path}', file=sys.stdout):
             json_dict = json.loads(line)
             example = Example.from_dict(json_dict, tokenizer)
             examples.append(example)
@@ -194,7 +203,7 @@ def load_dataset(file_path, tokenizer):
     return examples
 
 
-def evaluate(model, dataset, tokenizer, device, batch_size, input_config, verbose=False):
+def evaluate(model, dataset, tokenizer, device, batch_size, config, verbose=False):
     was_training = model.training
     model.eval()
 
@@ -203,7 +212,8 @@ def evaluate(model, dataset, tokenizer, device, batch_size, input_config, verbos
     eval_result = defaultdict(list)
 
     for eval_iter, examples in enumerate(tqdm(batch_iter(dataset, batch_size, shuffle=False), total=len(dataset) // batch_size, file=sys.stdout)):
-        batch, batch_mata = Example.to_tensor_dict(examples, tokenizer, **input_config)
+        batch, batch_mata = Example.to_tensor_dict(examples, tokenizer,
+                                                   use_sample_value=config['use_sample_value'])
 
         batch = tuple(t.to(device) for t in batch)
         input_ids, input_mask, segment_ids, label_ids = batch
@@ -230,40 +240,26 @@ def evaluate(model, dataset, tokenizer, device, batch_size, input_config, verbos
     return eval_result
 
 
-def main(args):
-    args = {'--bert-model': 'bert-base-uncased',
-            'train': True,
-            '--use-sample-value': False,
-            '--no-cuda': False,
-            '--work-dir': 'exp_runs/debug_max_len/',
-            '--seed': 1234,
-            '--batch-size': 32,
-            '--gradient-accumulation-steps': 4,
-            '--lr': 5e-5,
-            '--warmup-proportion': 0.1,
-            '--train-epochs': 5,
-            '--fix-bert': True,
-            '--data-path': '/home/pcyin/datasets/relation_prediction/train.rel_prediction.jsonl',
-            '--dev-data-path': '/home/pcyin/datasets/relation_prediction/dev.rel_prediction.jsonl'}
-            #'--data-path': '/Users/yinpengcheng/Research/SemanticParsing/WikiSQL/annotated/dev.rel_prediction.small.jsonl',
-            #'--dev-data-path': '/Users/yinpengcheng/Research/SemanticParsing/WikiSQL/annotated/dev.rel_prediction.small.jsonl'}
-    bert_model = args['--bert-model']
+def train(args):
+    config = json.load(open(args['CONFIG_FILE']))
+    #'--data-path': '/Users/yinpengcheng/Research/SemanticParsing/WikiSQL/annotated/dev.rel_prediction.small.jsonl',
+    #'--dev-data-path': '/Users/yinpengcheng/Research/SemanticParsing/WikiSQL/annotated/dev.rel_prediction.small.jsonl'}
+
+    work_dir = args['--work-dir']
+    seed = int(args['--seed'])
+    bert_model = config['bert_model']
+    learning_rate = config['lr']
+    num_train_epochs = config['train_epochs']
+    warmup_proportion = config['warmup_proportion']
+    gradient_accumulation_steps = config['gradient_accumulation_steps']
+    batch_size = config['batch_size']
+    batch_size = batch_size // gradient_accumulation_steps
+    fix_bert = config['fix_bert']
+    config['work-dir'] = work_dir
 
     tokenizer = BertTokenizer.from_pretrained(bert_model, do_lower_case=True)
-
     device = torch.device("cuda" if torch.cuda.is_available() and not args['--no-cuda'] else "cpu")
     n_gpu = torch.cuda.device_count()
-    seed = int(args['--seed'])
-    learning_rate = float(args['--lr'])
-    num_train_epochs = int(args['--train-epochs'])
-    warmup_proportion = float(args['--warmup-proportion'])
-    gradient_accumulation_steps = int(args['--gradient-accumulation-steps'])
-    batch_size = int(args['--batch-size'])
-    batch_size = batch_size // gradient_accumulation_steps
-
-    input_config = {
-        'use_sample_value': args['--use-sample-value']
-    }
 
     tr_loss = 0.
     nb_tr_examples = 0
@@ -273,10 +269,16 @@ def main(args):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    work_dir = args['--work-dir']
     if not os.path.exists(work_dir):
         print(f'creating work dir [{work_dir}]', file=sys.stderr)
         os.makedirs(work_dir)
+
+    if args['--extra-config'] != '{}':
+        extra_config = args['--extra-config']
+        extra_config = json.loads(extra_config)
+        config.update(extra_config)
+
+    json.dump(config, open(os.path.join(work_dir, 'config.json'), 'w'), indent=2)
 
     cache_dir = PYTORCH_PRETRAINED_BERT_CACHE
     model = BertForTokenClassification.from_pretrained(bert_model, cache_dir=cache_dir, num_labels=len(label_space))
@@ -286,7 +288,7 @@ def main(args):
     # Prepare optimizer
     param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    if args['--fix-bert']:
+    if fix_bert:
         for param_name, param in param_optimizer:
             if 'bert.' in param_name:
                 param.requires_grad = False
@@ -295,8 +297,8 @@ def main(args):
         {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay) and p.requires_grad], 'weight_decay': 0.0}
     ]
 
-    train_data = load_dataset(args['--data-path'], tokenizer)
-    dev_data = load_dataset(args['--dev-data-path'], tokenizer)
+    train_data = load_dataset(config['data']['train_file'], tokenizer)
+    dev_data = load_dataset(config['data']['dev_file'], tokenizer)
     num_train_optimization_steps = math.ceil(len(train_data) / batch_size / gradient_accumulation_steps) * num_train_epochs
 
     optimizer = BertAdam(optimizer_grouped_parameters,
@@ -307,7 +309,7 @@ def main(args):
     model.train()
     for epoch_id in range(num_train_epochs):
         for train_iter, examples in enumerate(tqdm(batch_iter(train_data, batch_size, shuffle=True), total=len(train_data) // batch_size, file=sys.stdout)):
-            batch, batch_mata = Example.to_tensor_dict(examples, tokenizer, **input_config)
+            batch, batch_mata = Example.to_tensor_dict(examples, tokenizer, use_sample_value=config['use_sample_value'])
 
             batch = tuple(t.to(device) for t in batch)
             input_ids, input_mask, segment_ids, label_ids = batch
@@ -332,57 +334,55 @@ def main(args):
                 optimizer.step()
                 optimizer.zero_grad()
 
-        epoch_eval_result = evaluate(model, dev_data, tokenizer, device, batch_size, input_config)
+        epoch_eval_result = evaluate(model, dev_data, tokenizer, device, batch_size, config, verbose=False)
         print(epoch_eval_result, file=sys.stderr)
 
         # Save a trained model and the associated configuration
         model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
         output_model_file = os.path.join(work_dir, WEIGHTS_NAME)
-        torch.save(model_to_save.state_dict(), output_model_file + f'.epoch{epoch_id}')
+        torch.save(model_to_save.state_dict(), output_model_file)
         output_config_file = os.path.join(work_dir, CONFIG_NAME)
         with open(output_config_file, 'w') as f:
             f.write(model_to_save.config.to_json_string())
 
 
 def test(args):
-    args = {'--bert-model': 'bert-base-uncased',
-            '--use-sample-value': False,
-            '--no-cuda': False,
-            '--work-dir': 'exp_runs/debug/',
-            '--seed': 1234,
-            '--batch-size': 16,
-            '--gradient-accumulation-steps': 8,
-            '--lr': 1e-4,
-            '--warmup-proportion': 0.1,
-            '--train-epochs': 3,
-            '--data-path': '/home/pcyin/datasets/relation_prediction/wikitable.examples.jsonl'}
-    # '--data-path': '/Users/yinpengcheng/Research/SemanticParsing/WikiSQL/annotated/dev.rel_prediction.small.jsonl',
-    # '--dev-data-path': '/Users/yinpengcheng/Research/SemanticParsing/WikiSQL/annotated/dev.rel_prediction.small.jsonl'}
-    bert_model = args['--bert-model']
-    batch_size = int(args['--batch-size'])
-    input_config = {
-        'use_sample_value': args['--use-sample-value']
-    }
+    model_path = args['MODEL_PATH']
+    work_dir = '/'.join(model_path.split('/')[:-1])
+    config_file = os.path.join(work_dir, 'config.json')
+    print(f'Model config file: {config_file}', file=sys.stderr)
+    config = json.load(open(config_file))
 
-    tokenizer = BertTokenizer.from_pretrained(bert_model, do_lower_case=True)
+    if args['--extra-config'] != '{}':
+        extra_config = args['--extra-config']
+        extra_config = json.loads(extra_config)
+        print(f'load extra config: {extra_config}', file=sys.stderr)
+        config.update(extra_config)
+
+    # Load a trained model and config that you have fine-tuned
+    output_config_file = os.path.join(work_dir, CONFIG_NAME)
+    print(f'BERT config file: {output_config_file}', file=sys.stderr)
+    bert_config = BertConfig(output_config_file)
+    model = BertForTokenClassification(bert_config, num_labels=len(label_space))
+    print(f'model file: {model_path}', file=sys.stderr)
+    model.load_state_dict(torch.load(model_path))
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args['--no-cuda'] else "cpu")
 
-    # Load a trained model and config that you have fine-tuned
-    output_config_file = os.path.join(args['--work-dir'], CONFIG_NAME)
-    output_model_file = os.path.join(args['--work-dir'], WEIGHTS_NAME + '.epoch0')
-    config = BertConfig(output_config_file)
-    model = BertForTokenClassification(config, num_labels=len(label_space))
-    model.load_state_dict(torch.load(output_model_file))
     model = model.to(device)
     model.eval()
 
-    dev_data = load_dataset(args['--data-path'], tokenizer)
-    epoch_eval_result = evaluate(model, dev_data, tokenizer, device, batch_size, input_config, verbose=True)
+    tokenizer = BertTokenizer.from_pretrained(config['bert_model'], do_lower_case=True)
+    dev_data = load_dataset(args['TEST_FILE_PATH'], tokenizer)
+
+    epoch_eval_result = evaluate(model, dev_data, tokenizer, device, config['batch_size'], config, verbose=True)
 
     print(epoch_eval_result, file=sys.stderr)
 
 
 if __name__ == '__main__':
-    main({})
-    # test({})
+    cmd_args = docopt(__doc__)
+    if cmd_args['train']:
+        train(cmd_args)
+    elif cmd_args['test']:
+        test(cmd_args)
