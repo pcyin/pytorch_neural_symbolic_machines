@@ -29,13 +29,15 @@ from docopt import docopt
 from pytorch_pretrained_bert import BertForTokenClassification, BertTokenizer, BertAdam, PYTORCH_PRETRAINED_BERT_CACHE, \
     BertConfig
 
+from table.bert.model import BERTRelationIdentificationModel
+
 CONFIG_NAME = 'bert_config.json'
 WEIGHTS_NAME = 'pytorch_model.bin'
 MAX_SEQUENCE_LEN = 512
 label_space = {'O': 0, 'I-COLUMN': 1}
 
 
-def get_examples_eval_results(examples, predictions, target_labels, column_spans, verbose=False):
+def get_examples_eval_results(examples, predictions, target_labels, meta_info, verbose=False):
     correct_list = []
     col_wise_correct_list = []
 
@@ -44,19 +46,19 @@ def get_examples_eval_results(examples, predictions, target_labels, column_spans
             if verbose:
                 print(f'Example: {example.question}', file=sys.stderr)
 
-            example_column_span = column_spans[i]
+            example_column_span = meta_info['column_spans'][i]
+            input_seq_len = meta_info['input_seq_lens'][i]
             example_pred_labels = predictions[i].cpu().numpy()
             example_tgt_labels = target_labels[i].cpu().numpy()
             e_correct_list = []
 
             for col_id, column in enumerate(example.columns):
                 col_span_start, col_span_end = example_column_span[column.name]
-                if col_span_start > len(example_pred_labels):
+                if col_span_start > input_seq_len:
                     is_triggered = False
                 else:
-                    column_pred_labels = example_pred_labels[col_span_start: col_span_end]
-                    span_len = len(column_pred_labels)
-                    is_triggered = (column_pred_labels == label_space['I-COLUMN']).sum() >= 0.8 * span_len
+                    column_pred_labels = example_pred_labels[col_id]
+                    is_triggered = column_pred_labels == label_space['I-COLUMN']
 
                 is_correct = is_triggered and (col_id in example.target_column_ids) or \
                              not is_triggered and (col_id not in example.target_column_ids)
@@ -118,7 +120,7 @@ class Example(object):
         question = data['question']
         question_tokens = tokenizer.tokenize(question)
 
-        column_start_id = 1 + len(question_tokens) + 1  # [CLS] + question + [SEP]
+        # column_start_id = 1 + len(question_tokens) + 1  # [CLS] + question + [SEP]
         for col_id, col_data in enumerate(data['columns']):
             if col_data['is_target']:
                 targets.append(col_id)
@@ -135,7 +137,7 @@ class Example(object):
         all_tokens_ids = []
         all_label_ids = []
         all_segment_ids = []
-        meta = {'column_spans': []}
+        meta_info = {'column_spans': [], 'input_seq_lens': []}
         for example in examples:
             tokens = ['[CLS]'] + example.question_tokens + ['[SEP]']
             labels = ['O'] * len(tokens)
@@ -168,28 +170,59 @@ class Example(object):
             segment_ids += [1] * (len(tokens) - len(segment_ids))
 
             token_ids = tokenizer.convert_tokens_to_ids(tokens)
-            label_ids = [label_space[x] for x in labels]
+            seq_label_ids = [label_space[x] for x in labels]
             assert len(tokens) == len(labels)
 
             all_tokens_ids.append(token_ids)
-            all_label_ids.append(label_ids)
+            all_label_ids.append(seq_label_ids)
             all_segment_ids.append(segment_ids)
-            meta['column_spans'].append(col_spans)
+            meta_info['column_spans'].append(col_spans)
 
         max_len = min(max(len(x) for x in all_tokens_ids), MAX_SEQUENCE_LEN)
 
         input_ids = np.zeros((len(examples), max_len), dtype=np.int64)
-        label_ids = np.zeros((len(examples), max_len), dtype=np.int64)
+        seq_label_ids = np.zeros((len(examples), max_len), dtype=np.int64)
         input_mask = torch.zeros(len(examples), max_len)
         segment_ids = np.zeros((len(examples), max_len), dtype=np.int64)
+
+        max_column_num = max(len(e.columns) for e in examples)
+        column_token_mask = torch.zeros(len(examples), max_len)
+        column_token_to_column_id = torch.zeros(len(examples), max_len, dtype=torch.long)
+        column_mask = torch.zeros(len(examples), max_column_num)
+        labels = torch.zeros(len(examples), max_column_num, dtype=torch.long)
+        labels.fill_(label_space['O'])
+
         for i, token_ids in enumerate(all_tokens_ids):
+            example = examples[i]
+
             token_seq_len = min(len(token_ids), MAX_SEQUENCE_LEN)
             input_ids[i, :token_seq_len] = token_ids[:token_seq_len]
             input_mask[i, :token_seq_len] = 1.
-            label_ids[i, :token_seq_len] = all_label_ids[i][:token_seq_len]
+            seq_label_ids[i, :token_seq_len] = all_label_ids[i][:token_seq_len]
             segment_ids[i, :token_seq_len] = all_segment_ids[i][:token_seq_len]
 
-        return (torch.from_numpy(input_ids), input_mask, torch.from_numpy(segment_ids), torch.from_numpy(label_ids)), meta
+            meta_info['input_seq_lens'].append(token_seq_len)
+
+            for col_id, column in enumerate(example.columns):
+                col_start, col_end = meta_info['column_spans'][i][column.name]
+                if col_end <= token_seq_len:  # truncate to approprate length
+                    column_token_to_column_id[i, col_start: col_end] = col_id
+                    column_token_mask[i, col_start: col_end] = 1.
+
+                    column_mask[i, col_id] = 1.
+                    labels[i, col_id] = label_space['I-COLUMN' if col_id in example.target_column_ids else 'O']
+
+        tensor_dict = dict(
+            input_ids=torch.from_numpy(input_ids),
+            token_type_ids=torch.from_numpy(segment_ids),
+            attention_mask=input_mask,
+            column_token_to_column_id=column_token_to_column_id,
+            column_token_mask=column_token_mask,
+            column_mask=column_mask,
+            labels=labels
+        )
+
+        return tensor_dict, meta_info
 
 
 def load_dataset(file_path, tokenizer):
@@ -215,16 +248,18 @@ def evaluate(model, dataset, tokenizer, device, batch_size, config, verbose=Fals
         batch, batch_mata = Example.to_tensor_dict(examples, tokenizer,
                                                    use_sample_value=config['use_sample_value'])
 
-        batch = tuple(t.to(device) for t in batch)
-        input_ids, input_mask, segment_ids, label_ids = batch
+        {v.to(device) for v in batch.values()}
 
         with torch.no_grad():
-            tmp_eval_loss = model(input_ids, segment_ids, input_mask, label_ids)
-            tmp_eval_loss = tmp_eval_loss.sum() / input_mask.sum()
+            tmp_eval_loss = model(**batch)
+            tmp_eval_loss = tmp_eval_loss.sum() / batch['column_mask'].sum()
 
-            logits = model(input_ids, segment_ids, input_mask)
+            pred_batch = {k: v for k, v in batch.items() if k != 'labels'}
+            logits = model(**pred_batch)
             pred_label_ids = torch.argmax(logits, dim=-1)
-            tmp_eval_result = get_examples_eval_results(examples, pred_label_ids, label_ids, batch_mata['column_spans'], verbose=verbose)
+            tmp_eval_result = get_examples_eval_results(examples, pred_label_ids, batch['labels'],
+                                                        batch_mata,
+                                                        verbose=verbose)
             for key, val in tmp_eval_result.items():
                 eval_result[key].extend(val)
 
@@ -242,8 +277,6 @@ def evaluate(model, dataset, tokenizer, device, batch_size, config, verbose=Fals
 
 def train(args):
     config = json.load(open(args['CONFIG_FILE']))
-    #'--data-path': '/Users/yinpengcheng/Research/SemanticParsing/WikiSQL/annotated/dev.rel_prediction.small.jsonl',
-    #'--dev-data-path': '/Users/yinpengcheng/Research/SemanticParsing/WikiSQL/annotated/dev.rel_prediction.small.jsonl'}
 
     work_dir = args['--work-dir']
     seed = int(args['--seed'])
@@ -281,7 +314,7 @@ def train(args):
     json.dump(config, open(os.path.join(work_dir, 'config.json'), 'w'), indent=2)
 
     cache_dir = PYTORCH_PRETRAINED_BERT_CACHE
-    model = BertForTokenClassification.from_pretrained(bert_model, cache_dir=cache_dir, num_labels=len(label_space))
+    model = BERTRelationIdentificationModel.from_pretrained(bert_model, cache_dir=cache_dir)
     model = model.to(device)
     model = torch.nn.DataParallel(model)
 
@@ -310,10 +343,9 @@ def train(args):
     for epoch_id in range(num_train_epochs):
         for train_iter, examples in enumerate(tqdm(batch_iter(train_data, batch_size, shuffle=True), total=len(train_data) // batch_size, file=sys.stdout)):
             batch, batch_mata = Example.to_tensor_dict(examples, tokenizer, use_sample_value=config['use_sample_value'])
+            {v.to(device) for v in batch.values()}
 
-            batch = tuple(t.to(device) for t in batch)
-            input_ids, input_mask, segment_ids, label_ids = batch
-            loss = model(input_ids, segment_ids, input_mask, label_ids)
+            loss = model(**batch)
             if n_gpu > 1:
                 loss = loss.mean()
 
@@ -325,7 +357,7 @@ def train(args):
             iter_loss = loss.item()
             print(iter_loss, file=sys.stderr)
             tr_loss += iter_loss
-            nb_tr_examples += input_ids.size(0)
+            nb_tr_examples += len(examples)
             nb_tr_steps += 1
 
             del loss
