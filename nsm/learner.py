@@ -37,7 +37,7 @@ class Learner(Process):
         # create agent
         self.agent = PGAgent.build(self.config).train()
         if self.gpu_id >= 0:
-            self.agent.to(torch.device("cuda:%d" % self.gpu_id))
+            self.agent = self.agent.to(torch.device("cuda", self.gpu_id))
 
         self.train()
 
@@ -70,6 +70,10 @@ class Learner(Process):
                                         vocab_file=config['vocab_file'],
                                         en_vocab_file=config['en_vocab_file'],
                                         embedding_file=config['embedding_file'])
+
+            fine_tune_start = config['fine_tune_start']
+            fine_tune_every_niter = config['fine_tune_every_niter']
+
             for env in dev_set:
                 env.punish_extra_work = False
                 env.use_cache = False
@@ -143,7 +147,7 @@ class Learner(Process):
             cum_loss += loss_val * len(train_samples)
             cum_examples += len(train_samples)
 
-            if use_finetune and train_iter >= config['fine_tune_start'] and train_iter % config['fine_tune_every_niter'] == 0:
+            if use_finetune and train_iter >= fine_tune_start and train_iter % fine_tune_every_niter == 0:
                 print(f'[FineTune] start iterative fine tuning...', file=sys.stderr)
                 dev_scores = []
 

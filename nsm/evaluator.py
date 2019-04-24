@@ -63,7 +63,7 @@ class Evaluator(Process):
     def run(self):
         self.agent = PGAgent.build(self.config).eval()
         if self.gpu_id >= 0:
-            self.agent.to(torch.device("cuda:%d" % self.gpu_id))
+            self.agent = self.agent.to(torch.device("cuda", self.gpu_id))
 
         self.load_environments()
         summary_writer = SummaryWriter(os.path.join(self.config['work_dir'], 'tb_log/dev'))
