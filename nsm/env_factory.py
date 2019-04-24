@@ -302,9 +302,10 @@ class QAProgrammingEnv(Environment):
             self.id_feature_dict = id_feature_dict
         else:
             prop_features = question_annotation['prop_features']
+            feat_num = len(list(prop_features.values())[0])
             self.id_feature_dict = {}
             for name, id in de_vocab.vocab.items():
-                self.id_feature_dict[id] = [0]
+                self.id_feature_dict[id] = [0] * feat_num
                 if name in self.interpreter.namespace:
                     val = self.interpreter.namespace[name]['value']
                     if (isinstance(val, str)) and val in prop_features:
