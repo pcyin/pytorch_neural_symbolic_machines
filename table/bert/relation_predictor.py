@@ -11,6 +11,8 @@ Options:
     --debug                                     Debug mode
     --seed=<int>                                Seed [default: 0]
     --work-dir=<dir>                            work dir [default: exp_runs/debug]
+    --save-every-epoch                          save the models after each epoch
+    --verbose                                   verbose prediction
     --extra-config=<str>                        extra config [default: {}]
 """
 
@@ -29,7 +31,7 @@ from docopt import docopt
 from pytorch_pretrained_bert import BertForTokenClassification, BertTokenizer, BertAdam, PYTORCH_PRETRAINED_BERT_CACHE, \
     BertConfig
 
-from table.bert.model import BERTRelationIdentificationModel
+from model import *
 
 CONFIG_NAME = 'bert_config.json'
 WEIGHTS_NAME = 'pytorch_model.bin'
@@ -37,9 +39,10 @@ MAX_SEQUENCE_LEN = 512
 label_space = {'O': 0, 'I-COLUMN': 1}
 
 
-def get_examples_eval_results(examples, predictions, target_labels, meta_info, verbose=False):
+def get_examples_eval_results(examples, predicted_labels, target_labels, meta_info, verbose=False):
     correct_list = []
     col_wise_correct_list = []
+    predictions = dict()
 
     with torch.no_grad():
         for i, example in enumerate(examples):
@@ -48,10 +51,11 @@ def get_examples_eval_results(examples, predictions, target_labels, meta_info, v
 
             example_column_span = meta_info['column_spans'][i]
             input_seq_len = meta_info['input_seq_lens'][i]
-            example_pred_labels = predictions[i].cpu().numpy()
+            example_pred_labels = predicted_labels[i].cpu().numpy()
             example_tgt_labels = target_labels[i].cpu().numpy()
             e_correct_list = []
 
+            column_pred_result = dict()
             for col_id, column in enumerate(example.columns):
                 col_span_start, col_span_end = example_column_span[column.name]
                 if col_span_start > input_seq_len:
@@ -68,15 +72,23 @@ def get_examples_eval_results(examples, predictions, target_labels, meta_info, v
                 if verbose:
                     print(f'>>Column: {column.name} [pred={is_triggered}, gold={col_id in example.target_column_ids}]', file=sys.stderr)
 
+                column_pred_result[column.name] = {'prediction': bool(is_triggered),
+                                                   'reference': col_id in example.target_column_ids,
+                                                   'is_correct': is_correct}
+
             is_example_correct = all(e_correct_list)
             correct_list.append(is_example_correct)
             col_wise_correct_list.extend(e_correct_list)
+            predictions[example.guid] = {'question': example.question,
+                                         'columns': column_pred_result}
+
             if verbose:
                 print(f'Example Correct: {is_example_correct}', file=sys.stderr)
                 print('', file=sys.stderr)
 
     return {'column_wise_acc': col_wise_correct_list,
-            'example_acc': correct_list}
+            'example_acc': correct_list,
+            'predictions': predictions}
 
 
 def batch_iter(data, batch_size, shuffle=False):
@@ -130,18 +142,22 @@ class Example(object):
                             sample_value_tokens=tokenizer.tokenize(str(col_data['sample_value'])))
             columns.append(column)
 
-        return cls(data['question'], columns, targets, question_tokens=question_tokens)
+        return cls(data['question'], columns, targets, question_tokens=question_tokens, guid=data['guid'])
 
     @classmethod
-    def to_tensor_dict(cls, examples, tokenizer, use_sample_value=False):
+    def to_tensor_dict(cls, examples, tokenizer, config):
         all_tokens_ids = []
         all_label_ids = []
         all_segment_ids = []
+        question_lens = []
+        use_sample_value = config['use_sample_value']
+
         meta_info = {'column_spans': [], 'input_seq_lens': []}
         for example in examples:
             tokens = ['[CLS]'] + example.question_tokens + ['[SEP]']
             labels = ['O'] * len(tokens)
             segment_ids = [0] * len(tokens)
+            question_lens.append(len(tokens) - 1)  # take into account ending [SEP], keep leading [CLS]
 
             col_spans = dict()
             col_start_idx = len(tokens)
@@ -192,6 +208,9 @@ class Example(object):
         labels = torch.zeros(len(examples), max_column_num, dtype=torch.long)
         labels.fill_(label_space['O'])
 
+        max_question_len = max(question_lens)
+        question_token_mask = torch.zeros(len(examples), max_question_len)
+
         for i, token_ids in enumerate(all_tokens_ids):
             example = examples[i]
 
@@ -202,6 +221,7 @@ class Example(object):
             segment_ids[i, :token_seq_len] = all_segment_ids[i][:token_seq_len]
 
             meta_info['input_seq_lens'].append(token_seq_len)
+            question_token_mask[i, :question_lens[i]] = 1.
 
             for col_id, column in enumerate(example.columns):
                 col_start, col_end = meta_info['column_spans'][i][column.name]
@@ -219,6 +239,7 @@ class Example(object):
             column_token_to_column_id=column_token_to_column_id,
             column_token_mask=column_token_mask,
             column_mask=column_mask,
+            question_token_mask=question_token_mask,
             labels=labels
         )
 
@@ -244,11 +265,10 @@ def evaluate(model, dataset, tokenizer, device, batch_size, config, verbose=Fals
     num_steps = 0
     eval_result = defaultdict(list)
 
+    predictions = dict()
     for eval_iter, examples in enumerate(tqdm(batch_iter(dataset, batch_size, shuffle=False), total=len(dataset) // batch_size, file=sys.stdout)):
-        batch, batch_mata = Example.to_tensor_dict(examples, tokenizer,
-                                                   use_sample_value=config['use_sample_value'])
-
-        {v.to(device) for v in batch.values()}
+        batch, batch_mata = Example.to_tensor_dict(examples, tokenizer, config)
+        batch = {k: v.to(device) for k, v in batch.items()}
 
         with torch.no_grad():
             tmp_eval_loss = model(**batch)
@@ -260,7 +280,8 @@ def evaluate(model, dataset, tokenizer, device, batch_size, config, verbose=Fals
             tmp_eval_result = get_examples_eval_results(examples, pred_label_ids, batch['labels'],
                                                         batch_mata,
                                                         verbose=verbose)
-            for key, val in tmp_eval_result.items():
+            predictions.update(tmp_eval_result['predictions'])
+            for key, val in ((k, v) for k, v in tmp_eval_result.items() if k != 'predictions'):
                 eval_result[key].extend(val)
 
         eval_loss += tmp_eval_loss.item()
@@ -272,14 +293,20 @@ def evaluate(model, dataset, tokenizer, device, batch_size, config, verbose=Fals
     if was_training:
         model = model.train()
 
-    return eval_result
+    return eval_result, predictions
 
 
 def train(args):
     config = json.load(open(args['CONFIG_FILE']))
 
+    if args['--extra-config'] != '{}':
+        extra_config = args['--extra-config']
+        extra_config = json.loads(extra_config)
+        config.update(extra_config)
+
     work_dir = args['--work-dir']
     seed = int(args['--seed'])
+    model_cls = config['model_class']
     bert_model = config['bert_model']
     learning_rate = config['lr']
     num_train_epochs = config['train_epochs']
@@ -306,15 +333,10 @@ def train(args):
         print(f'creating work dir [{work_dir}]', file=sys.stderr)
         os.makedirs(work_dir)
 
-    if args['--extra-config'] != '{}':
-        extra_config = args['--extra-config']
-        extra_config = json.loads(extra_config)
-        config.update(extra_config)
-
     json.dump(config, open(os.path.join(work_dir, 'config.json'), 'w'), indent=2)
 
     cache_dir = PYTORCH_PRETRAINED_BERT_CACHE
-    model = BERTRelationIdentificationModel.from_pretrained(bert_model, cache_dir=cache_dir)
+    model = globals()[model_cls].from_pretrained(bert_model, cache_dir=cache_dir)
     model = model.to(device)
     model = torch.nn.DataParallel(model)
 
@@ -342,7 +364,7 @@ def train(args):
     model.train()
     for epoch_id in range(num_train_epochs):
         for train_iter, examples in enumerate(tqdm(batch_iter(train_data, batch_size, shuffle=True), total=len(train_data) // batch_size, file=sys.stdout)):
-            batch, batch_mata = Example.to_tensor_dict(examples, tokenizer, use_sample_value=config['use_sample_value'])
+            batch, batch_mata = Example.to_tensor_dict(examples, tokenizer, config)
             {v.to(device) for v in batch.values()}
 
             loss = model(**batch)
@@ -367,11 +389,13 @@ def train(args):
                 optimizer.zero_grad()
 
         epoch_eval_result = evaluate(model, dev_data, tokenizer, device, batch_size, config, verbose=False)
-        print(epoch_eval_result, file=sys.stderr)
+        print(f'[Epoch {epoch_id}]', epoch_eval_result, file=sys.stderr)
 
         # Save a trained model and the associated configuration
         model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
         output_model_file = os.path.join(work_dir, WEIGHTS_NAME)
+        if args['--save-every-epoch']:
+            output_model_file = output_model_file + f'.epoch{epoch_id}'
         torch.save(model_to_save.state_dict(), output_model_file)
         output_config_file = os.path.join(work_dir, CONFIG_NAME)
         with open(output_config_file, 'w') as f:
@@ -395,7 +419,7 @@ def test(args):
     output_config_file = os.path.join(work_dir, CONFIG_NAME)
     print(f'BERT config file: {output_config_file}', file=sys.stderr)
     bert_config = BertConfig(output_config_file)
-    model = BertForTokenClassification(bert_config, num_labels=len(label_space))
+    model = globals()[config['model_class']](bert_config)
     print(f'model file: {model_path}', file=sys.stderr)
     model.load_state_dict(torch.load(model_path))
 
@@ -407,7 +431,10 @@ def test(args):
     tokenizer = BertTokenizer.from_pretrained(config['bert_model'], do_lower_case=True)
     dev_data = load_dataset(args['TEST_FILE_PATH'], tokenizer)
 
-    epoch_eval_result = evaluate(model, dev_data, tokenizer, device, config['batch_size'], config, verbose=True)
+    epoch_eval_result, predictions = evaluate(model, dev_data, tokenizer, device, config['batch_size'], config, verbose=args['--verbose'])
+    # print(predictions)
+    with open(os.path.join(work_dir, os.path.basename(args['TEST_FILE_PATH']) + '.prediction'), 'w') as f:
+        json.dump(predictions, f, indent=2)
 
     print(epoch_eval_result, file=sys.stderr)
 
