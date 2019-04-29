@@ -43,7 +43,7 @@ from docopt import docopt
 
 
 def load_environments(example_files: List[str], table_file: str, vocab_file: str, en_vocab_file: str,
-                      embedding_file: str):
+                      embedding_file: str, column_annotation_file: str = None):
     dataset = []
     for fn in example_files:
         dataset += load_jsonl(fn)
@@ -244,10 +244,11 @@ def distributed_train(args):
     if use_cuda:
         print(f'use cuda', file=sys.stderr)
         learner_gpu_id = 0
-        evaluator_gpu_id = 1 # 1 if torch.cuda.device_count() >= 2 else 0
+        evaluator_gpu_id = 0 #1 if torch.cuda.device_count() >= 2 else 0
 
     learner = Learner(config, learner_gpu_id)
 
+    print(f'Evaluator uses GPU {evaluator_gpu_id}', file=sys.stderr)
     evaluator = Evaluator(config, eval_file=config['dev_file'], gpu_id=evaluator_gpu_id)
     learner.register_evaluator(evaluator)
 

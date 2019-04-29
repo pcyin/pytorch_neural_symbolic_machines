@@ -1,0 +1,15 @@
+{
+  "data": {
+    "train_file": "/Users/yinpengcheng/Research/SemanticParsing/WikiSQL/annotated/dev.rel_prediction.small.jsonl",
+    "dev_file": "/Users/yinpengcheng/Research/SemanticParsing/WikiSQL/annotated/dev.rel_prediction.small.jsonl"
+  },
+  "bert_model": "bert-base-uncased",
+  "model_class": "BERTRelationIdentificationModel",
+  "use_sample_value": false,
+  "batch_size": 3,
+  "gradient_accumulation_steps": 1,
+  "lr": 5e-5,
+  "warmup_proportion": 0.1,
+  "train_epochs": 5,
+  "fix_bert": false
+}
