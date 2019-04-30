@@ -26,7 +26,7 @@ import numpy as np
 import torch
 from tensorboardX import SummaryWriter
 
-from nsm.actor import Actor, AllGoodReplayBuffer
+from nsm.actor import Actor, ReplayBuffer
 from nsm.agent_factory import PGAgent
 from nsm.embedding import EmbeddingModel
 from nsm.env_factory import QAProgrammingEnv
@@ -40,6 +40,8 @@ from nsm.learner import Learner
 
 import multiprocessing
 from docopt import docopt
+
+from nsm.program_cache import SharedProgramCache
 
 
 def load_environments(example_files: List[str], table_file: str, vocab_file: str, en_vocab_file: str,
@@ -262,8 +264,9 @@ def distributed_train(args):
         actor_id = shard_id % actor_num
         actor_shard_dict[actor_id].append(shard_id)
 
+    shared_program_cache = SharedProgramCache()
     for actor_id in range(actor_num):
-        actor = Actor(actor_id, shard_ids=actor_shard_dict[actor_id], config=config)
+        actor = Actor(actor_id, shard_ids=actor_shard_dict[actor_id], shared_program_cache=shared_program_cache, config=config)
         learner.register_actor(actor)
 
         actors.append(actor)
@@ -278,6 +281,10 @@ def distributed_train(args):
 
     print('starting learner', file=sys.stderr)
     learner.start()
+
+    while True:
+        print('size of program cache', len(shared_program_cache.program_cache), file=sys.stderr)
+        time.sleep(5)
 
     print('Learner process {}, evaluator process {}'.format(learner.pid, evaluator.pid), file=sys.stderr)
 
@@ -396,10 +403,10 @@ def sanity_check():
     # from nsm.actor import load_programs_to_buffer
     # load_programs_to_buffer(envs, buffer, config['saved_program_file'])
     #
-    # trajs1 = buffer._buffer[envs[0].name][:3]
-    # trajs2 = buffer._buffer[envs[1].name][:3]
-    # trajs3 = buffer._buffer[envs[2].name][:3]
-    # trajs4 = buffer._buffer[envs[3].name][:3]
+    # trajs1 = buffer.trajectory_buffer[envs[0].name][:3]
+    # trajs2 = buffer.trajectory_buffer[envs[1].name][:3]
+    # trajs3 = buffer.trajectory_buffer[envs[2].name][:3]
+    # trajs4 = buffer.trajectory_buffer[envs[3].name][:3]
     # agent.eval()
     #
     # batch_probs = agent(trajs1 + trajs2 + trajs3 + trajs4)

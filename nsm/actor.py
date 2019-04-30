@@ -5,7 +5,7 @@ import random
 import sys
 import time
 import json
-from typing import List
+from typing import List, Dict
 
 import numpy as np
 
@@ -18,6 +18,8 @@ from nsm.env_factory import Trajectory, Environment
 
 import torch
 
+from nsm.program_cache import SharedProgramCache
+
 
 def normalize_probs(p_list):
     smoothing = 1.e-8
@@ -26,74 +28,65 @@ def normalize_probs(p_list):
     return p_list / p_list.sum()
 
 
-def load_programs_to_buffer(envs, replay_buffer, saved_programs_file_path):
-    programs = json.load(open(saved_programs_file_path))
-
-    trajectories = []
-    n = 0
-    total_env = 0
-    n_found = 0
-    for env in envs:
-        total_env += 1
-        found = False
-        if env.name in programs:
-            program_str_list = programs[env.name]
-            n += len(program_str_list)
-            env.cache._set = set(program_str_list)
-            for program_str in program_str_list:
-                program = program_str.split()
-                try:
-                    traj = Trajectory.from_program(env, program)
-                except ValueError:
-                    print(f'Error loading program {program} for env {env.name}', file=sys.stderr)
-                    continue
-
-                if traj is not None:
-                    trajectories.append(traj)
-                    found = True
-                    n_found += 1
-
-    print('@' * 100)
-    print('loading programs from file {}'.format(saved_programs_file_path))
-    print('at least 1 solution found fraction: {}'.format(
-        float(n_found) / total_env))
-
-    replay_buffer.save_trajectories(trajectories)
-
-    n_trajs_buffer = 0
-    for k, v in replay_buffer._buffer.items():
-        n_trajs_buffer += len(v)
-
-    print('{} programs in the file'.format(n))
-    print('{} programs extracted'.format(len(trajectories)))
-    print('{} programs in the buffer'.format(n_trajs_buffer))
-    print('@' * 100)
-
-
-class AllGoodReplayBuffer(object):
-    def __init__(self, agent=None, de_vocab=None, discount_factor=1.0, debug=False):
-        self._buffer = dict()
+class ReplayBuffer(object):
+    def __init__(self, agent, shared_program_cache, discount_factor=1.0, debug=False):
+        self.trajectory_buffer = dict()
         self.discount_factor = discount_factor
         self.agent = agent
-        self.de_vocab = de_vocab
-        self.program_prob_dict = dict()
-        self.prob_sum_dict = dict()
+        self.shared_program_cache = shared_program_cache
+        self.env_program_prob_dict = dict()
+        self.env_program_prob_sum_dict = dict()
+
+    def load(self, envs: List[Environment], saved_programs_file_path: str):
+        programs = json.load(open(saved_programs_file_path))
+
+        trajectories = []
+        n = 0
+        total_env = 0
+        n_found = 0
+        for env in envs:
+            total_env += 1
+            found = False
+            if env.name in programs:
+                program_str_list = programs[env.name]
+                n += len(program_str_list)
+                env.cache._set = set(program_str_list)
+                for program_str in program_str_list:
+                    program = program_str.split()
+                    try:
+                        traj = Trajectory.from_program(env, program)
+                    except ValueError:
+                        print(f'Error loading program {program} for env {env.name}', file=sys.stderr)
+                        continue
+
+                    if traj is not None:
+                        trajectories.append(traj)
+                        found = True
+                        n_found += 1
+
+        print('@' * 100, file=sys.stderr)
+        print('loading programs from file {}'.format(saved_programs_file_path), file=sys.stderr)
+        print('at least 1 solution found fraction: {}'.format(
+            float(n_found) / total_env), file=sys.stderr)
+
+        self.save_trajectories(trajectories)
+        print('{} programs in the file'.format(n), file=sys.stderr)
+        print('{} programs extracted'.format(len(trajectories)), file=sys.stderr)
+        print('{} programs in the buffer'.format(self.program_num), file=sys.stderr)
+        print('@' * 100, file=sys.stderr)
 
     def has_found_solution(self, env_name):
-        return env_name in self._buffer and self._buffer[env_name]
+        return env_name in self.trajectory_buffer and self.trajectory_buffer[env_name]
 
     def contains(self, traj: Trajectory):
         env_name = traj.environment_name
-        if env_name not in self.program_prob_dict:
+        if env_name not in self.trajectory_buffer:
             return False
 
         program = traj.program
-        if not program:
-            program = self.de_vocab.lookup(traj.tgt_action_ids, reverse=True)
-
         program_str = ' '.join(program)
 
-        if program_str in self.program_prob_dict[env_name]:
+        if program_str in self.env_program_prob_dict[env_name]:
             return True
         else:
             return False
@@ -101,20 +94,25 @@ class AllGoodReplayBuffer(object):
     @property
     def size(self):
         n = 0
-        for _, v in self._buffer.items():
+        for _, v in self.trajectory_buffer.items():
             n += len(v)
         return n
 
+    @property
+    def program_num(self):
+        return sum(len(v) for v in self.env_program_prob_dict.values())
+
+    def update_program_prob(self, env_name, program: List[str], prob: float):
+        self.env_program_prob_dict[env_name][' '.join(program)] = prob
+        self.shared_program_cache.update_hypothesis(env_name, program, prob)
+
     def add_trajectory(self, trajectory: Trajectory, prob=None):
         program = trajectory.program
-        if not program:
-            program = self.de_vocab.lookup(trajectory.tgt_action_ids, reverse=True)
 
-        program_str = ' '.join(program)
+        self.shared_program_cache.add_hypothesis(trajectory.environment_name, program, prob)
+        self.env_program_prob_dict.setdefault(trajectory.environment_name, dict())[' '.join(program)] = prob
 
-        self.program_prob_dict.setdefault(trajectory.environment_name, dict())[program_str] = prob
-
-        self._buffer.setdefault(trajectory.environment_name, []).append(trajectory)
+        self.trajectory_buffer.setdefault(trajectory.environment_name, []).append(trajectory)
 
     def save_trajectories(self, trajectories):
         for trajectory in trajectories:
@@ -132,9 +130,8 @@ class AllGoodReplayBuffer(object):
 
     def all_samples(self, agent=None):
         samples = dict()
-        for env, trajs in self._buffer.items():
-            prob_dict = self.program_prob_dict[env]
-            samples[env] = [Sample(traj, prob=prob_dict[' '.join(traj.program)]) for traj in trajs]
+        for env_name, trajs in self.trajectory_buffer.items():
+            samples[env_name] = [Sample(traj, prob=self.env_program_prob_dict[env_name][' '.join(traj.program)]) for traj in trajs]
 
         return samples
 
@@ -144,8 +141,8 @@ class AllGoodReplayBuffer(object):
 
         # Collect all the trajs for the selected environments.
         for name in select_env_names:
-            if name in self._buffer:
-                trajs += self._buffer[name]
+            if name in self.trajectory_buffer:
+                trajs += self.trajectory_buffer[name]
 
         if len(trajs) == 0:
             return []
@@ -172,13 +169,13 @@ class AllGoodReplayBuffer(object):
                 random.shuffle(samples)
                 samples = heapq.nlargest(
                     truncate_at_n, samples, key=lambda s: s.prob)
-                self._buffer[name] = [sample.traj for sample in samples]
+                self.trajectory_buffer[name] = [sample.traj for sample in samples]
 
             # Compute the sum of prob of replays in the buffer.
-            self.prob_sum_dict[name] = sum([sample.prob for sample in samples])
+            self.env_program_prob_sum_dict[name] = sum([sample.prob for sample in samples])
 
             for sample in samples:
-                self.program_prob_dict[name][' '.join(sample.trajectory.program)] = sample.prob
+                self.update_program_prob(name, sample.trajectory.program, sample.prob)
 
             if use_top_k:
                 # Select the top k samples weighted by their probs.
@@ -204,7 +201,7 @@ class AllGoodReplayBuffer(object):
 
 
 class Actor(Process):
-    def __init__(self, actor_id, shard_ids, config):
+    def __init__(self, actor_id, shard_ids, shared_program_cache, config):
         super(Actor, self).__init__(daemon=True)
 
         # self.checkpoint_queue = checkpoint_queue
@@ -221,6 +218,7 @@ class Actor(Process):
         self.model_path = None
         self.checkpoint_queue = None
         self.train_queue = None
+        self.shared_program_cache = shared_program_cache
 
     def run(self):
         def get_train_shard_path(i):
@@ -234,10 +232,10 @@ class Actor(Process):
         self.agent = PGAgent.build(self.config).eval()
         nn_util.glorot_init(p for p in self.agent.parameters() if p.requires_grad)
 
-        self.replay_buffer = AllGoodReplayBuffer(self.agent, self.environments[0].de_vocab)
+        self.replay_buffer = ReplayBuffer(self.agent, self.shared_program_cache)
 
         if self.config['load_saved_programs']:
-            load_programs_to_buffer(self.environments, self.replay_buffer, self.config['saved_program_file'])
+            self.replay_buffer.load(self.environments, self.config['saved_program_file'])
             print(f'[Actor {self.actor_id}] loaded {self.replay_buffer.size} programs to buffer', file=sys.stderr)
 
         self.train()
@@ -294,7 +292,7 @@ class Actor(Process):
                     if method == 'mapo':
                         train_examples = []
                         for sample in replay_samples:
-                            sample_weight = self.replay_buffer.prob_sum_dict.get(sample.trajectory.environment_name, 0.)
+                            sample_weight = self.replay_buffer.env_program_prob_sum_dict.get(sample.trajectory.environment_name, 0.)
                             sample_weight = max(sample_weight, self.config['min_replay_samples_weight'])
 
                             sample.weight = sample_weight * 1. / config['n_replay_samples']
@@ -308,7 +306,7 @@ class Actor(Process):
                         self.replay_buffer.save_samples(non_replay_samples)
 
                         for sample in non_replay_samples:
-                            replay_samples_prob = self.replay_buffer.prob_sum_dict.get(sample.trajectory.environment_name, 0.)
+                            replay_samples_prob = self.replay_buffer.env_program_prob_sum_dict.get(sample.trajectory.environment_name, 0.)
                             if replay_samples_prob > 0.:
                                 # clip the sum of probabilities for replay samples if the replay buffer is not empty
                                 replay_samples_prob = max(replay_samples_prob, self.config['min_replay_samples_weight'])
@@ -321,8 +319,8 @@ class Actor(Process):
                         n_clip = 0
                         for env in batched_envs:
                             name = env.name
-                            if (name in self.replay_buffer.prob_sum_dict and
-                                    self.replay_buffer.prob_sum_dict[name] < self.config['min_replay_samples_weight']):
+                            if (name in self.replay_buffer.env_program_prob_dict and
+                                    self.replay_buffer.env_program_prob_sum_dict[name] < self.config['min_replay_samples_weight']):
                                 n_clip += 1
                         clip_frac = n_clip / len(batched_envs)
 
@@ -330,7 +328,7 @@ class Actor(Process):
                         samples_info['clip_frac'] = clip_frac
                     elif method == 'mml':
                         for sample in replay_samples:
-                            sample.weight = sample.prob / self.replay_buffer.prob_sum_dict[sample.trajectory.environment_name]
+                            sample.weight = sample.prob / self.replay_buffer.env_program_prob_sum_dict[sample.trajectory.environment_name]
                         train_examples = replay_samples
                     else:
                         train_examples = replay_samples
