@@ -15,7 +15,6 @@ from multiprocessing import Process
 
 from nsm import nn_util
 from nsm.agent_factory import PGAgent, Sample
-from nsm.consistency_utils import compute_consistency_score
 from nsm.env_factory import Trajectory, QAProgrammingEnv
 
 import torch

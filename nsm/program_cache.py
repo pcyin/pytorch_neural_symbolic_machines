@@ -11,10 +11,20 @@ class SharedProgramCache(object):
             self.program_cache[env_name] = dict()
 
         hypotheses = self.program_cache[env_name]
-        hypotheses[' '.join(program)] = prob
+        hypotheses[' '.join(program)] = {'program': program, 'prob': prob}
         self.program_cache[env_name] = hypotheses
 
     def update_hypothesis(self, env_name: str, program: List[str], prob: float):
         hypotheses = self.program_cache[env_name]
-        hypotheses[' '.join(program)] = prob
+        hypotheses[' '.join(program)] = {'program': program, 'prob': prob}
         self.program_cache[env_name] = hypotheses
+
+    def contains_env(self, env_name):
+        return env_name in self.program_cache
+
+    def get_hypotheses(self, env_name):
+        result = self.program_cache[env_name]
+        result = [x for x in result.values() if x['prob'] is not None]
+        result = sorted(result, key=lambda x: -x['prob'])
+
+        return result

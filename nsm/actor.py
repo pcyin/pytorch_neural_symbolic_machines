@@ -14,6 +14,7 @@ from multiprocessing import Process
 
 from nsm import nn_util
 from nsm.agent_factory import PGAgent, Sample
+from nsm.consistency_utils import ConsistencyModel, QuestionSimilarityModel
 from nsm.env_factory import Trajectory, Environment
 
 import torch
@@ -135,14 +136,14 @@ class ReplayBuffer(object):
 
         return samples
 
-    def replay(self, environments, n_samples=1, use_top_k=False, truncate_at_n=0, replace=True):
+    def replay(self, environments, n_samples=1, use_top_k=False, truncate_at_n=0, replace=True, consistency_model: ConsistencyModel = None):
         select_env_names = set([e.name for e in environments])
         trajs = []
 
         # Collect all the trajs for the selected environments.
-        for name in select_env_names:
-            if name in self.trajectory_buffer:
-                trajs += self.trajectory_buffer[name]
+        for env_name in select_env_names:
+            if env_name in self.trajectory_buffer:
+                trajs += self.trajectory_buffer[env_name]
 
         if len(trajs) == 0:
             return []
@@ -153,11 +154,11 @@ class ReplayBuffer(object):
         samples = [Sample(trajectory=t, prob=p) for t, p in zip(trajs, trajectory_probs)]
         env_sample_dict = dict()
         for sample in samples:
-            name = sample.trajectory.environment_name
-            env_sample_dict.setdefault(name, []).append(sample)
+            env_name = sample.trajectory.environment_name
+            env_sample_dict.setdefault(env_name, []).append(sample)
 
         replay_samples = []
-        for name, samples in env_sample_dict.items():
+        for env_name, samples in env_sample_dict.items():
             n = len(samples)
 
             # Truncated the number of samples in the selected
@@ -169,13 +170,13 @@ class ReplayBuffer(object):
                 random.shuffle(samples)
                 samples = heapq.nlargest(
                     truncate_at_n, samples, key=lambda s: s.prob)
-                self.trajectory_buffer[name] = [sample.traj for sample in samples]
+                self.trajectory_buffer[env_name] = [sample.traj for sample in samples]
 
             # Compute the sum of prob of replays in the buffer.
-            self.env_program_prob_sum_dict[name] = sum([sample.prob for sample in samples])
+            self.env_program_prob_sum_dict[env_name] = sum([sample.prob for sample in samples])
 
             for sample in samples:
-                self.update_program_prob(name, sample.trajectory.program, sample.prob)
+                self.update_program_prob(env_name, sample.trajectory.program, sample.prob)
 
             if use_top_k:
                 # Select the top k samples weighted by their probs.
@@ -186,6 +187,13 @@ class ReplayBuffer(object):
                 # Randomly samples according to their probs.
 
                 p_samples = normalize_probs([sample.prob for sample in samples])
+                if consistency_model:
+                    log_p_samples = np.log([sample.prob for sample in samples])
+                    consistency_scores = consistency_model.compute_consistency_score(env_name, [sample.trajectory.program for sample in samples])
+                    p_samples = consistency_model.rescore(log_p_samples, consistency_scores)
+                else:
+                    p_samples = normalize_probs([sample.prob for sample in samples])
+
                 if replace:
                     selected_sample_indices = np.random.choice(len(samples), n_samples, p=p_samples)
                 else:
@@ -219,6 +227,11 @@ class Actor(Process):
         self.checkpoint_queue = None
         self.train_queue = None
         self.shared_program_cache = shared_program_cache
+        self.consistency_model = None
+
+    @property
+    def use_consistency_model(self):
+        return self.config['use_consistency_model']
 
     def run(self):
         def get_train_shard_path(i):
@@ -227,6 +240,10 @@ class Actor(Process):
 
         # load environments
         self.load_environments([get_train_shard_path(i) for i in self.shard_ids])
+
+        if self.use_consistency_model:
+            print('Load consistency model', file=sys.stderr)
+            self.consistency_model = ConsistencyModel(QuestionSimilarityModel.load(self.config['question_similarity_model_path']), self.shared_program_cache)
 
         # create agent and set it to evaluation mode
         self.agent = PGAgent.build(self.config).eval()
@@ -283,7 +300,8 @@ class Actor(Process):
                     replay_samples = self.replay_buffer.replay(batched_envs,
                                                                n_samples=config['n_replay_samples'],
                                                                use_top_k=config['use_top_k_replay_samples'],
-                                                               replace=config['replay_sample_with_replacement'])
+                                                               replace=config['replay_sample_with_replacement'],
+                                                               consistency_model=self.consistency_model)
                     t2 = time.time()
                     print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, got {len(replay_samples)} replay samples (took {t2 - t1}s)',
                           file=sys.stderr)

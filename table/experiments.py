@@ -282,9 +282,9 @@ def distributed_train(args):
     print('starting learner', file=sys.stderr)
     learner.start()
 
-    while True:
-        print('size of program cache', len(shared_program_cache.program_cache), file=sys.stderr)
-        time.sleep(5)
+    # while True:
+    #     print('size of program cache', len(shared_program_cache.program_cache), file=sys.stderr)
+    #     time.sleep(5)
 
     print('Learner process {}, evaluator process {}'.format(learner.pid, evaluator.pid), file=sys.stderr)
 
