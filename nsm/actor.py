@@ -341,7 +341,7 @@ class Actor(Process):
                         for env in batched_envs:
                             name = env.name
                             if (name in self.replay_buffer.env_program_prob_dict and
-                                    self.replay_buffer.env_program_prob_sum_dict[name] < self.config['min_replay_samples_weight']):
+                                    self.replay_buffer.env_program_prob_sum_dict.get(name, 0.) < self.config['min_replay_samples_weight']):
                                 n_clip += 1
                         clip_frac = n_clip / len(batched_envs)
 
