@@ -186,11 +186,10 @@ class ReplayBuffer(object):
             else:
                 # Randomly samples according to their probs.
 
-                p_samples = normalize_probs([sample.prob for sample in samples])
                 if consistency_model:
-                    log_p_samples = np.log([sample.prob for sample in samples])
-                    consistency_scores = consistency_model.compute_consistency_score(env_name, [sample.trajectory.program for sample in samples])
-                    p_samples = consistency_model.rescore(log_p_samples, consistency_scores)
+                    # log_p_samples = np.log([sample.prob for sample in samples])
+                    p_samples = consistency_model.compute_consistency_and_rescore(env_name, samples)
+                    # p_samples = consistency_model.rescore(log_p_samples, consistency_scores)
                 else:
                     p_samples = normalize_probs([sample.prob for sample in samples])
 
@@ -243,7 +242,11 @@ class Actor(Process):
 
         if self.use_consistency_model:
             print('Load consistency model', file=sys.stderr)
-            self.consistency_model = ConsistencyModel(QuestionSimilarityModel.load(self.config['question_similarity_model_path']), self.shared_program_cache)
+            self.consistency_model = ConsistencyModel(QuestionSimilarityModel.load(self.config['question_similarity_model_path']),
+                                                      self.shared_program_cache,
+                                                      self.environments,
+                                                      log_file=os.path.join(self.config['work_dir'], f'consistency_model_actor_{self.actor_id}.log'),
+                                                      debug=False)
 
         # create agent and set it to evaluation mode
         self.agent = PGAgent.build(self.config).eval()
@@ -363,12 +366,14 @@ class Actor(Process):
                 epoch_end = time.time()
                 print(f"[Actor {self.actor_id}] epoch {epoch_id} finished, took {epoch_end - epoch_start}s", file=sys.stderr)
 
-                buffer_content = dict()
-                for env_name, samples in self.replay_buffer.all_samples().items():
-                    buffer_content[env_name] = [dict(program=' '.join(sample.trajectory.program), prob=sample.prob) for sample in samples]
-                buffer_save_path = os.path.join(config['work_dir'], f'replay_buffer_actor{self.actor_id}_epoch{epoch_id}.json')
-                with open(buffer_save_path, 'w') as f:
-                    json.dump(buffer_content, f, indent=2)
+                # buffer_content = dict()
+                # for env_name, samples in self.replay_buffer.all_samples().items():
+                #     buffer_content[env_name] = [dict(program=' '.join(sample.trajectory.program), prob=sample.prob) for sample in samples]
+                # buffer_save_path = os.path.join(config['work_dir'], f'replay_buffer_actor{self.actor_id}_epoch{epoch_id}.json')
+                # with open(buffer_save_path, 'w') as f:
+                #     json.dump(buffer_content, f, indent=2)
+                if self.consistency_model:
+                    self.consistency_model.log_file.flush()
 
     def load_environments(self, file_paths):
         from table.experiments import load_environments, create_environments

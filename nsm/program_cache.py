@@ -28,3 +28,8 @@ class SharedProgramCache(object):
         result = sorted(result, key=lambda x: -x['prob'])
 
         return result
+
+    def stat(self):
+        num_envs = len(self.program_cache)
+
+        return {'env_num': num_envs}

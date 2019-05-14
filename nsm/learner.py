@@ -16,6 +16,7 @@ from nsm import nn_util
 from nsm.agent_factory import PGAgent, Sample
 from nsm.env_factory import Trajectory
 from nsm.evaluator import Evaluation
+from nsm.program_cache import SharedProgramCache
 from nsm.retrainer import Retrainer, load_nearest_neighbors
 
 import torch
@@ -23,7 +24,7 @@ from tensorboardX import SummaryWriter
 
 
 class Learner(Process):
-    def __init__(self, config, gpu_id=-1, summary_writer=None):
+    def __init__(self, config, gpu_id=-1, shared_program_cache: SharedProgramCache = None):
         super(Learner, self).__init__(daemon=True)
 
         self.train_queue = multiprocessing.Queue()
@@ -32,6 +33,7 @@ class Learner(Process):
         self.gpu_id = gpu_id
         self.actor_message_vars = []
         self.current_model_path = None
+        self.shared_program_cache = shared_program_cache
 
     def run(self):
         # create agent
