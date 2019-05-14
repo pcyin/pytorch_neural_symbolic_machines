@@ -246,7 +246,7 @@ class Actor(Process):
                                                       self.shared_program_cache,
                                                       self.environments,
                                                       log_file=os.path.join(self.config['work_dir'], f'consistency_model_actor_{self.actor_id}.log'),
-                                                      debug=False)
+                                                      debug=self.actor_id == 0)
 
         # create agent and set it to evaluation mode
         self.agent = PGAgent.build(self.config).eval()
