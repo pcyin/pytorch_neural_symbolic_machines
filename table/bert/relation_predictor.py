@@ -282,7 +282,7 @@ def evaluate(model, dataset, tokenizer, device, batch_size, config, verbose=Fals
         batch = {k: v.to(device) for k, v in batch.items()}
 
         with torch.no_grad():
-            tmp_eval_loss = model(**batch)
+            tmp_eval_loss, _ = model(**batch)
             tmp_eval_loss = tmp_eval_loss.sum() / batch['column_mask'].sum()
 
             pred_batch = {k: v for k, v in batch.items() if k != 'labels'}
@@ -378,7 +378,7 @@ def train(args):
             batch, batch_mata = Example.to_tensor_dict(examples, tokenizer, config)
             {v.to(device) for v in batch.values()}
 
-            loss = model(**batch)
+            loss, _ = model(**batch)
             if n_gpu > 1:
                 loss = loss.mean()
 
