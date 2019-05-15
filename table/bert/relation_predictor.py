@@ -39,20 +39,20 @@ MAX_SEQUENCE_LEN = 512
 label_space = {'O': 0, 'I-COLUMN': 1}
 
 
-def get_examples_eval_results(examples, predicted_labels, target_labels, meta_info, verbose=False):
+def get_examples_eval_results(examples, predicted_labels, pred_info, target_labels, meta_info, verbose=False):
     correct_list = []
     col_wise_correct_list = []
     predictions = dict()
 
     with torch.no_grad():
-        for i, example in enumerate(examples):
+        for example_id, example in enumerate(examples):
             if verbose:
                 print(f'Example: {example.question}', file=sys.stderr)
 
-            example_column_span = meta_info['column_spans'][i]
-            input_seq_len = meta_info['input_seq_lens'][i]
-            example_pred_labels = predicted_labels[i].cpu().numpy()
-            example_tgt_labels = target_labels[i].cpu().numpy()
+            example_column_span = meta_info['column_spans'][example_id]
+            input_seq_len = meta_info['input_seq_lens'][example_id]
+            example_pred_labels = predicted_labels[example_id].cpu().numpy()
+            example_tgt_labels = target_labels[example_id].cpu().numpy()
             e_correct_list = []
 
             column_pred_result = dict()
@@ -72,9 +72,20 @@ def get_examples_eval_results(examples, predicted_labels, target_labels, meta_in
                 if verbose:
                     print(f'>>Column: {column.name} [pred={is_triggered}, gold={col_id in example.target_column_ids}]', file=sys.stderr)
 
+                question_token_align_score = None
+                if pred_info and 'attention_matrix' in pred_info:
+                    # (max_question_len, max_column_num)
+                    question_column_alignment = pred_info['attention_matrix'][example_id].cpu().numpy()
+                    # (max_question_len)
+                    col_question_token_scores = question_column_alignment[:, col_id]
+                    # [CLS] + question_tokens
+                    question_token_align_score = [[example.question_tokens[i], float(col_question_token_scores[i + 1])]
+                                                  for i in range(0, len(example.question_tokens))]
+
                 column_pred_result[column.name] = {'prediction': bool(is_triggered),
                                                    'reference': col_id in example.target_column_ids,
-                                                   'is_correct': is_correct}
+                                                   'is_correct': is_correct,
+                                                   'question_token_alignment': question_token_align_score}
 
             is_example_correct = all(e_correct_list)
             correct_list.append(is_example_correct)
@@ -275,9 +286,9 @@ def evaluate(model, dataset, tokenizer, device, batch_size, config, verbose=Fals
             tmp_eval_loss = tmp_eval_loss.sum() / batch['column_mask'].sum()
 
             pred_batch = {k: v for k, v in batch.items() if k != 'labels'}
-            logits = model(**pred_batch)
+            logits, pred_info = model(**pred_batch, return_attention_matrix=verbose)
             pred_label_ids = torch.argmax(logits, dim=-1)
-            tmp_eval_result = get_examples_eval_results(examples, pred_label_ids, batch['labels'],
+            tmp_eval_result = get_examples_eval_results(examples, pred_label_ids, pred_info, batch['labels'],
                                                         batch_mata,
                                                         verbose=verbose)
             predictions.update(tmp_eval_result['predictions'])
@@ -388,7 +399,7 @@ def train(args):
                 optimizer.step()
                 optimizer.zero_grad()
 
-        epoch_eval_result = evaluate(model, dev_data, tokenizer, device, batch_size, config, verbose=False)
+        epoch_eval_result, _ = evaluate(model, dev_data, tokenizer, device, batch_size, config, verbose=False)
         print(f'[Epoch {epoch_id}]', epoch_eval_result, file=sys.stderr)
 
         # Save a trained model and the associated configuration
@@ -421,7 +432,7 @@ def test(args):
     bert_config = BertConfig(output_config_file)
     model = globals()[config['model_class']](bert_config)
     print(f'model file: {model_path}', file=sys.stderr)
-    model.load_state_dict(torch.load(model_path))
+    model.load_state_dict(torch.load(model_path, map_location=lambda storage, location: storage))
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args['--no-cuda'] else "cpu")
 

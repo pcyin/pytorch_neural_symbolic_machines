@@ -59,7 +59,9 @@ class BERTRelationIdentificationAlignmentBasedModel(BertPreTrainedModel):
 
         self.apply(self.init_bert_weights)
 
-    def forward(self, input_ids, token_type_ids, attention_mask, column_token_to_column_id, column_token_mask, column_mask, question_token_mask, labels=None):
+    def forward(self, input_ids, token_type_ids, attention_mask,
+                column_token_to_column_id, column_token_mask, column_mask, question_token_mask,
+                labels=None, return_attention_matrix=False):
         sequence_output, _ = self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False)
         sequence_output = self.dropout(sequence_output)
 
@@ -78,11 +80,12 @@ class BERTRelationIdentificationAlignmentBasedModel(BertPreTrainedModel):
                                          dim=1, dim_size=column_mask.size(-1))
 
         # (batch_size, max_question_len, max_column_num)
-        att_weights = self.attention(question_token_encoding, column_encoding.permute(0, 2, 1))
-        att_weights = (1. - question_token_mask.unsqueeze(-1)) * NEGATIVE_NUMBER + att_weights
+        att_weights_matrix = self.attention(question_token_encoding, column_encoding.permute(0, 2, 1))
+        att_weights = (1. - question_token_mask.unsqueeze(-1)) * NEGATIVE_NUMBER + att_weights_matrix
         # (batch_size, max_column_num)
         att_weights, _ = torch.max(att_weights, dim=1)
 
+        pred_info = dict()
         if labels is not None:
             loss_fct = BCEWithLogitsLoss()
             # Only keep active parts of the loss
@@ -93,12 +96,14 @@ class BERTRelationIdentificationAlignmentBasedModel(BertPreTrainedModel):
                 loss = loss_fct(active_logits, active_labels.float())
             else:
                 loss = loss_fct(att_weights.view(-1), labels.view(-1))
-            return loss
+            return loss, pred_info
         else:
             p = torch.sigmoid(att_weights)
             result = torch.stack([1 - p, p], dim=-1)
+            if return_attention_matrix:
+                pred_info['attention_matrix'] = att_weights_matrix
 
-            return result
+            return result, pred_info
 
     def attention(self, key, value):
         if self.attention_type == 'biaffine':
