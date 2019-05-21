@@ -31,6 +31,7 @@ class BERTRelationIdentificationModel(BertPreTrainedModel):
                                          dim=1, dim_size=column_mask.size(-1))
 
         logits = self.classifier(column_encoding)
+        info = dict()
 
         if labels is not None:
             loss_fct = CrossEntropyLoss()
@@ -42,9 +43,9 @@ class BERTRelationIdentificationModel(BertPreTrainedModel):
                 loss = loss_fct(active_logits, active_labels)
             else:
                 loss = loss_fct(logits.view(-1, 2), labels.view(-1))
-            return loss
+            return loss, info
         else:
-            return logits
+            return logits, info
 
 
 class BERTRelationIdentificationAlignmentBasedModel(BertPreTrainedModel):
