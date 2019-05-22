@@ -349,7 +349,7 @@ def train(args):
     json.dump(config, open(os.path.join(work_dir, 'config.json'), 'w'), indent=2)
 
     cache_dir = PYTORCH_PRETRAINED_BERT_CACHE
-    model = globals()[model_cls].from_pretrained(bert_model, cache_dir=cache_dir)
+    model = globals()[model_cls].from_pretrained(bert_model, cache_dir=cache_dir, **config)
     model = model.to(device)
     model = torch.nn.DataParallel(model)
 
@@ -432,7 +432,7 @@ def test(args):
     output_config_file = os.path.join(work_dir, CONFIG_NAME)
     print(f'BERT config file: {output_config_file}', file=sys.stderr)
     bert_config = BertConfig(output_config_file)
-    model = globals()[config['model_class']](bert_config)
+    model = globals()[config['model_class']](bert_config, **config)
     print(f'model file: {model_path}', file=sys.stderr)
     model.load_state_dict(torch.load(model_path, map_location=lambda storage, location: storage))
 
