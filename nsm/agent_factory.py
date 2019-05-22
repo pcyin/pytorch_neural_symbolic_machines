@@ -243,7 +243,7 @@ class Encoder(nn.Module):
         return context_encoding
 
 
-class MultiLayerDropoutLSTMCell(RNNCellBase):
+class MultiLayerDropoutLSTMCell(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, dropout=0., use_skip_connection=True):
         super(MultiLayerDropoutLSTMCell, self).__init__()
 
