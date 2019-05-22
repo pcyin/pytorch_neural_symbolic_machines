@@ -162,6 +162,7 @@ class Example(object):
         all_segment_ids = []
         question_lens = []
         use_sample_value = config['use_sample_value']
+        use_type_text = config['use_type_text']
 
         meta_info = {'column_spans': [], 'input_seq_lens': []}
         for example in examples:
@@ -175,8 +176,10 @@ class Example(object):
             for col_id, column in enumerate(example.columns):
                 col_tokens = column.name_tokens
                 if use_sample_value:
-                    col_tokens += ['('] + column.sample_value_tokens[:7] + [','] + column.type_tokens + [')']
-                else:
+                    col_tokens += ['('] + column.sample_value_tokens[:5]
+                    if use_type_text:
+                        col_tokens += [','] + column.type_tokens + [')']
+                elif use_type_text:
                     col_tokens += ['('] + column.type_tokens + [')']
                 # column_tokens.extend(col_tokens)
 
