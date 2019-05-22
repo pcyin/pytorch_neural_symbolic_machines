@@ -163,6 +163,7 @@ class Example(object):
         question_lens = []
         use_sample_value = config['use_sample_value']
         use_type_text = config['use_type_text']
+        column_delimiter = config.get('column_delimiter', '.')
 
         meta_info = {'column_spans': [], 'input_seq_lens': []}
         for example in examples:
@@ -179,6 +180,8 @@ class Example(object):
                     col_tokens += ['('] + column.sample_value_tokens[:5]
                     if use_type_text:
                         col_tokens += [','] + column.type_tokens + [')']
+                    else:
+                        col_tokens += [')']
                 elif use_type_text:
                     col_tokens += ['('] + column.type_tokens + [')']
                 # column_tokens.extend(col_tokens)
@@ -186,7 +189,7 @@ class Example(object):
                 column_label = 'I-COLUMN' if col_id in example.target_column_ids else 'O'
                 col_labels = [column_label] * len(col_tokens)
 
-                col_tokens.append('.')
+                col_tokens.append(column_delimiter)
                 col_labels.append('O')
 
                 col_spans[column.name] = (col_start_idx, col_start_idx + len(col_tokens))
