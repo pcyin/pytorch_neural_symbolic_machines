@@ -350,6 +350,12 @@ def train(args):
 
     cache_dir = PYTORCH_PRETRAINED_BERT_CACHE
     model = globals()[model_cls].from_pretrained(bert_model, cache_dir=cache_dir, **config)
+
+    pretrained_model_path = config.get('pretrained_model_path', None)
+    if pretrained_model_path:
+        print(f'model file: {pretrained_model_path}', file=sys.stderr)
+        model.load_state_dict(torch.load(pretrained_model_path, map_location=lambda storage, location: storage))
+
     model = model.to(device)
     model = torch.nn.DataParallel(model)
 
