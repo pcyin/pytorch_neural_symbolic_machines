@@ -39,7 +39,7 @@ MAX_SEQUENCE_LEN = 512
 label_space = {'O': 0, 'I-COLUMN': 1}
 
 
-def get_examples_eval_results(examples, predicted_labels, pred_info, target_labels, meta_info, verbose=False):
+def get_examples_eval_results(examples, predicted_labels, pred_info, target_labels, meta_info, verbose=False, probs=None):
     correct_list = []
     col_wise_correct_list = []
     predictions = dict()
@@ -54,6 +54,7 @@ def get_examples_eval_results(examples, predicted_labels, pred_info, target_labe
             example_pred_labels = predicted_labels[example_id].cpu().numpy()
             example_tgt_labels = target_labels[example_id].cpu().numpy()
             e_correct_list = []
+            example_column_triggered_prob = probs[example_id].cpu().numpy() if probs is not None else None
 
             column_pred_result = dict()
             for col_id, column in enumerate(example.columns):
@@ -82,9 +83,11 @@ def get_examples_eval_results(examples, predicted_labels, pred_info, target_labe
                     question_token_align_score = [[example.question_tokens[i], float(col_question_token_scores[i + 1])]
                                                   for i in range(0, len(example.question_tokens))]
 
+                reference = col_id in example.target_column_ids
                 column_pred_result[column.name] = {'prediction': bool(is_triggered),
-                                                   'reference': col_id in example.target_column_ids,
+                                                   'reference': reference,
                                                    'is_correct': is_correct,
+                                                   'confidence': float(example_column_triggered_prob[col_id, label_space['I-COLUMN'] if reference else 0]),
                                                    'question_token_alignment': question_token_align_score}
 
             is_example_correct = all(e_correct_list)
@@ -290,10 +293,12 @@ def evaluate(model, dataset, tokenizer, device, batch_size, config, verbose=Fals
 
             pred_batch = {k: v for k, v in batch.items() if k != 'labels'}
             logits, pred_info = model(**pred_batch, return_attention_matrix=verbose)
+            probs = torch.softmax(logits, dim=-1)
             pred_label_ids = torch.argmax(logits, dim=-1)
             tmp_eval_result = get_examples_eval_results(examples, pred_label_ids, pred_info, batch['labels'],
                                                         batch_mata,
-                                                        verbose=verbose)
+                                                        verbose=verbose,
+                                                        probs=probs)
             predictions.update(tmp_eval_result['predictions'])
             for key, val in ((k, v) for k, v in tmp_eval_result.items() if k != 'predictions'):
                 eval_result[key].extend(val)
