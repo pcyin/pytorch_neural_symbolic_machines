@@ -92,7 +92,7 @@ def get_examples_eval_results(examples, predicted_labels, pred_info, target_labe
             col_wise_correct_list.extend(e_correct_list)
             predictions[example.guid] = {'question': example.question,
                                          'columns': column_pred_result,
-                                         'is_correct': all(x[is_correct] for x in column_pred_result.values())}
+                                         'is_correct': all(x['is_correct'] for x in column_pred_result.values())}
 
             if verbose:
                 print(f'Example Correct: {is_example_correct}', file=sys.stderr)
