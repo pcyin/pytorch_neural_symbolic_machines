@@ -64,6 +64,7 @@ def get_examples_eval_results(examples, predicted_labels, pred_info, target_labe
                 else:
                     column_pred_labels = example_pred_labels[col_id]
                     is_triggered = column_pred_labels == label_space['I-COLUMN']
+                    confidence = float(example_column_triggered_prob[col_id, column_pred_labels])
 
                 is_correct = is_triggered and (col_id in example.target_column_ids) or \
                              not is_triggered and (col_id not in example.target_column_ids)
@@ -87,7 +88,7 @@ def get_examples_eval_results(examples, predicted_labels, pred_info, target_labe
                 column_pred_result[column.name] = {'prediction': bool(is_triggered),
                                                    'reference': reference,
                                                    'is_correct': is_correct,
-                                                   'confidence': float(example_column_triggered_prob[col_id, label_space['I-COLUMN'] if reference else 0]),
+                                                   'confidence': confidence,
                                                    'question_token_alignment': question_token_align_score}
 
             is_example_correct = all(e_correct_list)
