@@ -336,6 +336,7 @@ def train(args):
     batch_size = batch_size // gradient_accumulation_steps
     fix_bert = config['fix_bert']
     config['work-dir'] = work_dir
+    pretrained_model_path = config.get('pretrained_model_path', None)
 
     tokenizer = BertTokenizer.from_pretrained(bert_model, do_lower_case=True)
     device = torch.device("cuda" if torch.cuda.is_available() and not args['--no-cuda'] else "cpu")
@@ -355,8 +356,13 @@ def train(args):
 
     json.dump(config, open(os.path.join(work_dir, 'config.json'), 'w'), indent=2)
 
+    state_dict = None
+    if pretrained_model_path:
+        print(f'Load pretrained model from {pretrained_model_path}', file=sys.stderr)
+        state_dict = torch.load(pretrained_model_path, map_location='cpu')
+
     cache_dir = PYTORCH_PRETRAINED_BERT_CACHE
-    model = globals()[model_cls].from_pretrained(bert_model, cache_dir=cache_dir, **config)
+    model = globals()[model_cls].from_pretrained(bert_model, cache_dir=cache_dir, state_dict=state_dict, **config)
 
     pretrained_model_path = config.get('pretrained_model_path', None)
     if pretrained_model_path:
