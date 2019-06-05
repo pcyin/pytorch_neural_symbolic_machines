@@ -19,6 +19,7 @@ Options:
 import math
 import os
 import sys
+import logging
 from collections import defaultdict
 
 import torch
@@ -37,6 +38,9 @@ CONFIG_NAME = 'bert_config.json'
 WEIGHTS_NAME = 'pytorch_model.bin'
 MAX_SEQUENCE_LEN = 512
 label_space = {'O': 0, 'I-COLUMN': 1}
+
+logging.basicConfig(
+    level=logging.INFO)
 
 
 def get_examples_eval_results(examples, predicted_labels, pred_info, target_labels, meta_info, verbose=False, probs=None):
@@ -364,10 +368,9 @@ def train(args):
     cache_dir = PYTORCH_PRETRAINED_BERT_CACHE
     model = globals()[model_cls].from_pretrained(bert_model, cache_dir=cache_dir, state_dict=state_dict, **config)
 
-    pretrained_model_path = config.get('pretrained_model_path', None)
-    if pretrained_model_path:
-        print(f'model file: {pretrained_model_path}', file=sys.stderr)
-        model.load_state_dict(torch.load(pretrained_model_path, map_location=lambda storage, location: storage))
+    # if pretrained_model_path:
+    #     print(f'model file: {pretrained_model_path}', file=sys.stderr)
+    #     model.load_state_dict(torch.load(pretrained_model_path, map_location='cpu'))
 
     model = model.to(device)
     model = torch.nn.DataParallel(model)
