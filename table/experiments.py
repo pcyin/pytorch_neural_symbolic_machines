@@ -9,6 +9,7 @@ Options:
     --cuda                                  use GPU
     --work-dir=<dir>                        work directory
     --config=<file>                         path to config file
+    --extra-config=<str>                    Extra configuration [default: {}]
     --seed=<int>                            seed [default: 0]
     --eval-batch-size=<int>                 batch size for evaluation [default: 32]
     --eval-beam-size=<int>                  beam size for evaluation [default: 5]
@@ -231,6 +232,12 @@ def distributed_train(args):
 
     print(f'load config file [{config_file}]', file=sys.stderr)
     config = json.load(open(config_file))
+
+    if args['--extra-config'] != '{}':
+        extra_config = args['--extra-config']
+        print(f'load extra config [{extra_config}]', file=sys.stderr)
+        extra_config = json.loads(extra_config)
+        config.update(extra_config)
 
     work_dir = args['--work-dir']
     print(f'work dir [{work_dir}]', file=sys.stderr)
