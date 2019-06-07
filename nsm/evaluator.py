@@ -51,7 +51,7 @@ class Evaluation(object):
 
 class Evaluator(Process):
     def __init__(self, config, eval_file, gpu_id=-1):
-        super(Evaluator, self).__init__()
+        super(Evaluator, self).__init__(daemon=True)
         self.eval_queue = Queue()
         self.config = config
         self.eval_file = eval_file

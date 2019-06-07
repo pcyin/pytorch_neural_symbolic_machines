@@ -295,10 +295,13 @@ def distributed_train(args):
 
     print('Learner process {}, evaluator process {}'.format(learner.pid, evaluator.pid), file=sys.stderr)
 
-    for actor in actors:
-        actor.join()
+    # learner will quit first
     learner.join()
-    evaluator.join()
+    print('Learner exited', file=sys.stderr)
+
+    for actor in actors:
+        actor.kill()
+    evaluator.kill()
 
 
 def test(args):
