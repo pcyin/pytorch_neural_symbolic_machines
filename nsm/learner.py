@@ -22,8 +22,7 @@ from nsm.retrainer import Retrainer, load_nearest_neighbors
 import torch
 from tensorboardX import SummaryWriter
 
-
-STOP_SIGNAL = '#STOP#'
+from nsm.dist_util import STOP_SIGNAL
 
 
 class Learner(Process):

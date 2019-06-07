@@ -12,7 +12,7 @@ from nsm.env_factory import QAProgrammingEnv
 from multiprocessing import Queue, Process
 
 import torch
-from nsm.learner import STOP_SIGNAL
+from nsm.dist_util import STOP_SIGNAL
 
 
 class Evaluation(object):

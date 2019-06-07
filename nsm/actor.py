@@ -20,7 +20,7 @@ from nsm.env_factory import Trajectory, Environment
 import torch
 
 from nsm.program_cache import SharedProgramCache
-from nsm.learner import STOP_SIGNAL
+from nsm.dist_util import STOP_SIGNAL
 
 
 def normalize_probs(p_list):
