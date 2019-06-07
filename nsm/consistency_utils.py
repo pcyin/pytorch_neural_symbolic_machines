@@ -112,7 +112,7 @@ class ConsistencyModel(object):
                 for j, nn_hyp_j in enumerate(nn_hypotheses):
                     program_sim = ConsistencyModel.compute_program_similarity(hyp_i.trajectory.program, nn_hyp_j['program'])
                     nn_program_prob = normalized_nn_hyp_prob[j]
-                    consistency_score = 10 * q_sim * program_sim  # * nn_program_prob # (1 / nn_hyp_j['norm_prob'])
+                    consistency_score = q_sim * program_sim * nn_program_prob # (1 / nn_hyp_j['norm_prob'])
                     support_i += consistency_score
 
                     if debug:
