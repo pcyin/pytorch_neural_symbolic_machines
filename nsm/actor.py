@@ -245,6 +245,7 @@ class Actor(Process):
             self.consistency_model = ConsistencyModel(QuestionSimilarityModel.load(self.config['question_similarity_model_path']),
                                                       self.shared_program_cache,
                                                       self.environments,
+                                                      alpha=float(self.config['consistency_alpha']),
                                                       log_file=os.path.join(self.config['work_dir'], f'consistency_model_actor_{self.actor_id}.log'),
                                                       debug=self.actor_id == 0)
 

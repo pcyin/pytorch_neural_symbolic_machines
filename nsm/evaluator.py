@@ -80,7 +80,7 @@ class Evaluator(Process):
                 eval_results = Evaluation.evaluate_decode_results(self.environments, decode_results)
 
                 t2 = time.time()
-                print(f'[Evaluator] result={repr(eval_results)}, took {t2 - t1}s', file=sys.stderr)
+                print(f'[Evaluator] step={self.get_global_step()}, result={repr(eval_results)}, took {t2 - t1}s', file=sys.stderr)
 
                 summary_writer.add_scalar('eval/accuracy', eval_results['accuracy'], self.get_global_step())
                 summary_writer.add_scalar('eval/oracle_accuracy', eval_results['oracle_accuracy'], self.get_global_step())

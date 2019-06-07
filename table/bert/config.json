@@ -1,15 +1,19 @@
 {
   "data": {
-    "train_file": "/Users/yinpengcheng/Research/SemanticParsing/WikiSQL/annotated/dev.rel_prediction.small.jsonl",
-    "dev_file": "/Users/yinpengcheng/Research/SemanticParsing/WikiSQL/annotated/dev.rel_prediction.small.jsonl"
+    "train_file": "/Users/pengcheng/Research/datasets/WikiSQL/dev.rel_prediction.small.jsonl",
+    "dev_file": "/Users/pengcheng/Research/datasets/WikiSQL/dev.rel_prediction.small.jsonl"
   },
   "bert_model": "bert-base-uncased",
   "model_class": "BERTRelationIdentificationModel",
-  "use_sample_value": false,
+  "use_sample_value": true,
+  "use_type_text": true,
+  "column_delimiter": "[SEP]",
+  "output_dropout_prob": 0.1,
+  "column_representation": "mean_pool",
   "batch_size": 3,
   "gradient_accumulation_steps": 1,
   "lr": 5e-5,
   "warmup_proportion": 0.1,
-  "train_epochs": 5,
+  "train_epochs": 3,
   "fix_bert": false
 }

@@ -99,7 +99,8 @@ class Learner(Process):
                 forget_start_idx, forget_end_idx = n // 4, n // 2
                 p.data[forget_start_idx:forget_end_idx].fill_(1.)
 
-        while True:
+        max_train_step = config['max_train_step']
+        while train_iter < max_train_step:
             train_iter += 1
             optimizer.zero_grad()
 
@@ -220,4 +221,3 @@ class Learner(Process):
         msg_var = multiprocessing.Array(ctypes.c_char, 4096)
         self.eval_msg_val = msg_var
         evaluator.message_var = msg_var
-

@@ -10,6 +10,12 @@ from nsm.env_factory import QAProgrammingEnv
 from nsm.program_cache import SharedProgramCache
 
 
+def softmax(x: np.ndarray) -> np.ndarray:
+    e_x = np.exp(x - np.max(x))
+
+    return e_x / e_x.sum()
+
+
 class QuestionSimilarityModel(object):
     def __init__(self, similarity_matrix):
         self.similarity_matrix = similarity_matrix
@@ -58,6 +64,8 @@ class ConsistencyModel(object):
         debug = self.debug
         if debug:
             f_log = self.log_file
+            print('', file=f_log)
+            print('==============================================', file=f_log)
             print(f'Id: {q_id}', file=f_log)
             print(f'Question: %s' % self.environments[q_id].question_annotation['question'], file=f_log)
             print('', file=f_log)
@@ -67,7 +75,6 @@ class ConsistencyModel(object):
                 print(f'Question[{nn_question["id"]}]: {nn_question["question"]} ||| similarity={nn_question["similarity"]}', file=f_log)
 
             print('', file=f_log)
-            print('==============================================', file=f_log)
             print('', file=f_log)
             print('', file=f_log)
 
@@ -96,7 +103,7 @@ class ConsistencyModel(object):
                 normalized_nn_hyp_prob = [p / prob_sum for p in nn_hyp_probs]
 
                 nn_hypotheses = nn_question_predictions[nn_qid]
-                nn_hypotheses = sorted(nn_hypotheses, key=lambda x: -x['prob'])[:20]
+                nn_hypotheses = sorted(nn_hypotheses, key=lambda x: -x['prob'])[:5]
 
                 if debug:
                     similar_question = nn_question['question']
@@ -136,14 +143,18 @@ class ConsistencyModel(object):
 
         return supports
 
-    def rescore(self, log_p_samples, consistency_scores):
+    def rescore(self, log_p_samples, consistency_scores, alpha):
         """rescore each hypothesis based on consistency score"""
         if not isinstance(log_p_samples, np.ndarray):
             log_p_samples = np.array(log_p_samples)
         if not isinstance(consistency_scores, np.ndarray):
             consistency_scores = np.array(consistency_scores)
 
-        scores = log_p_samples + self.alpha * consistency_scores
+        p_consistency = softmax(alpha * consistency_scores)
+        log_p_consistency = np.log(p_consistency)
+        scores = log_p_samples + log_p_consistency
+
+        # scores = log_p_samples + self.alpha * consistency_scores
         exp_scores = np.exp(scores)
         norm_scores = exp_scores / np.sum(exp_scores)
 
@@ -154,7 +165,7 @@ class ConsistencyModel(object):
         consistency_scores = np.array(consistency_scores)
 
         log_p_samples = np.log([sample.prob for sample in hypotheses])
-        p_samples = self.rescore(log_p_samples, consistency_scores)
+        p_samples = self.rescore(log_p_samples, consistency_scores, self.alpha)
 
         if self.debug:
             print(f'Original sample probs: %s' % log_p_samples, file=self.log_file)
