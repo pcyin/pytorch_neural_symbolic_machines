@@ -20,6 +20,7 @@ from nsm.env_factory import Trajectory, Environment
 import torch
 
 from nsm.program_cache import SharedProgramCache
+from nsm.learner import STOP_SIGNAL
 
 
 def normalize_probs(p_list):
@@ -390,6 +391,11 @@ class Actor(Process):
         t1 = time.time()
         while True:
             new_model_path = self.checkpoint_queue.get()
+            if new_model_path == STOP_SIGNAL:
+                sys.stdout.flush()
+                sys.stderr.flush()
+                exit(0)
+
             if new_model_path == self.model_path or os.path.exists(new_model_path):
                 break
         print(f'[Actor {self.actor_id}] {time.time() - t1}s used to wait for new checkpoint', file=sys.stderr)

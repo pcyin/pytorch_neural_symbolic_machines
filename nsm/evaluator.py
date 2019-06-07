@@ -12,6 +12,7 @@ from nsm.env_factory import QAProgrammingEnv
 from multiprocessing import Queue, Process
 
 import torch
+from nsm.learner import STOP_SIGNAL
 
 
 class Evaluation(object):
@@ -111,6 +112,8 @@ class Evaluator(Process):
 
     def check_and_load_new_model(self):
         new_model_path = self.message_var.value.decode()
+        if new_model_path == STOP_SIGNAL:
+            exit(0)
         # print(f'[Evaluator] current newest model path [{new_model_path}]', file=sys.stderr)
         if new_model_path and new_model_path != self.model_path:
             t1 = time.time()

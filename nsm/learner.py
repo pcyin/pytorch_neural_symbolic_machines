@@ -23,6 +23,9 @@ import torch
 from tensorboardX import SummaryWriter
 
 
+STOP_SIGNAL = '#STOP#'
+
+
 class Learner(Process):
     def __init__(self, config, gpu_id=-1, shared_program_cache: SharedProgramCache = None):
         super(Learner, self).__init__(daemon=True)
@@ -34,6 +37,8 @@ class Learner(Process):
         self.actor_message_vars = []
         self.current_model_path = None
         self.shared_program_cache = shared_program_cache
+
+        self.actor_num = 0
 
     def run(self):
         # create agent
@@ -195,6 +200,10 @@ class Learner(Process):
             else:
                 self.push_new_model(self.current_model_path)
 
+        for i in range(self.actor_num):
+            self.checkpoint_queue.put(STOP_SIGNAL)
+        self.eval_msg_val.value = STOP_SIGNAL.encode()
+
     def update_model_to_actors(self, train_iter):
         t1 = time.time()
         model_state = self.agent.state_dict()
@@ -216,6 +225,7 @@ class Learner(Process):
     def register_actor(self, actor):
         actor.checkpoint_queue = self.checkpoint_queue
         actor.train_queue = self.train_queue
+        self.actor_num += 1
 
     def register_evaluator(self, evaluator):
         msg_var = multiprocessing.Array(ctypes.c_char, 4096)
