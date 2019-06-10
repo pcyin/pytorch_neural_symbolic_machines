@@ -300,7 +300,9 @@ def distributed_train(args):
     print('Learner exited', file=sys.stderr)
 
     for actor in actors:
+        actor.terminate()
         actor.join()
+    evaluator.terminate()
     evaluator.join()
 
 

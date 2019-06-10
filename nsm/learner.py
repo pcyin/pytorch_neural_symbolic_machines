@@ -199,9 +199,9 @@ class Learner(Process):
             else:
                 self.push_new_model(self.current_model_path)
 
-        for i in range(self.actor_num):
-            self.checkpoint_queue.put(STOP_SIGNAL)
-        self.eval_msg_val.value = STOP_SIGNAL.encode()
+        # for i in range(self.actor_num):
+        #     self.checkpoint_queue.put(STOP_SIGNAL)
+        # self.eval_msg_val.value = STOP_SIGNAL.encode()
 
     def update_model_to_actors(self, train_iter):
         t1 = time.time()

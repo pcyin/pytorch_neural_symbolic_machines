@@ -391,11 +391,11 @@ class Actor(Process):
         t1 = time.time()
         while True:
             new_model_path = self.checkpoint_queue.get()
-            if new_model_path == STOP_SIGNAL:
-                sys.stdout.flush()
-                sys.stderr.flush()
-                print('[Actor {self.actor_id}] Exited', file=sys.stderr)
-                exit(0)
+            # if new_model_path == STOP_SIGNAL:
+            #     print(f'[Actor {self.actor_id}] Exited', file=sys.stderr)
+            #     sys.stdout.flush()
+            #     sys.stderr.flush()
+            #     exit(0)
 
             if new_model_path == self.model_path or os.path.exists(new_model_path):
                 break
