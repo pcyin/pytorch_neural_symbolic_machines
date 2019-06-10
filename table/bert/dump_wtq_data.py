@@ -163,6 +163,7 @@ def dump_wtq_dataset_for_relation_prediction(args):
 def predict_relations_and_dump_results(args):
     model_path = args.model_path
     model_dir = model_path.parent
+    suffix = model_dir.name
 
     os.system(f"""
     python relation_predictor.py test \
@@ -177,7 +178,7 @@ def predict_relations_and_dump_results(args):
         """)
 
     train_shard_path = args.sp_train_file.expanduser()
-    tgt_train_folder = str(train_shard_path) + '_' + model_path.name
+    tgt_train_folder = str(train_shard_path) + '_' + suffix
     print(f'writing to {tgt_train_folder}')
     os.system(f"cp -r {train_shard_path} {tgt_train_folder}")
 
@@ -187,7 +188,7 @@ def predict_relations_and_dump_results(args):
                                                      model_dir / 'wtq.train_dev.rel_prediction.jsonl.prediction')
 
     test_examples_file = args.sp_test_file.expanduser()
-    tgt_test_file = Path(str(test_examples_file) + '_' + model_path.name)
+    tgt_test_file = Path(str(test_examples_file) + '_' + suffix)
     print(f'writing to {tgt_test_file}')
     os.system(f"cp {test_examples_file} {tgt_test_file}")
 
