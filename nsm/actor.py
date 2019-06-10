@@ -394,6 +394,7 @@ class Actor(Process):
             if new_model_path == STOP_SIGNAL:
                 sys.stdout.flush()
                 sys.stderr.flush()
+                print('[Actor {self.actor_id}] Exited', file=sys.stderr)
                 exit(0)
 
             if new_model_path == self.model_path or os.path.exists(new_model_path):
