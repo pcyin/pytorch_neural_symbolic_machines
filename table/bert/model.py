@@ -9,9 +9,10 @@ import torch.nn as nn
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel, BertConfig
 from torch.nn import CrossEntropyLoss, BCEWithLogitsLoss
 
-from table.bert.relation_predictor import CONFIG_NAME
 
 NEGATIVE_NUMBER = -1e8
+CONFIG_NAME = 'bert_config.json'
+WEIGHTS_NAME = 'pytorch_model.bin'
 
 
 class BERTRelationIdentificationModel(BertPreTrainedModel):

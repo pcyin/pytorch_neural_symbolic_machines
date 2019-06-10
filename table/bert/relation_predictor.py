@@ -34,8 +34,6 @@ from pytorch_pretrained_bert import BertForTokenClassification, BertTokenizer, B
 
 from model import *
 
-CONFIG_NAME = 'bert_config.json'
-WEIGHTS_NAME = 'pytorch_model.bin'
 MAX_SEQUENCE_LEN = 512
 label_space = {'O': 0, 'I-COLUMN': 1}
 
