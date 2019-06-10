@@ -146,7 +146,11 @@ def main():
     elif args.which == 'write':
         load_wtq_relation_prediction_results(args)
     elif args.which == 'predict_and_generate_parsing_data':
-        predict_relations_and_dump_results(args)
+        predict_relations_and_dump_results(args.model_path,
+                                           args.train_pred_file,
+                                           args.test_pred_file,
+                                           args.sp_train_file,
+                                           args.sp_test_file)
 
 
 def dump_wtq_dataset_for_relation_prediction(args):
@@ -160,40 +164,45 @@ def dump_wtq_dataset_for_relation_prediction(args):
     write_jsonl(test_examples, os.path.join(os.path.expanduser(args.work_dir), 'wtq.test.rel_prediction.jsonl'))
 
 
-def predict_relations_and_dump_results(args):
-    model_path = args.model_path
+def predict_relations_and_dump_results(model_path: Path,
+                                       train_pred_file: Path,
+                                       test_pred_file: Path,
+                                       sp_train_file: Path,
+                                       sp_test_file: Path):
     model_dir = model_path.parent
     suffix = model_dir.name
 
     os.system(f"""
     python relation_predictor.py test \
         {model_path} \
-        {args.train_pred_file.expanduser()}
+        {train_pred_file.expanduser()}
     """)
 
     os.system(f"""
         python relation_predictor.py test \
             {model_path} \
-            {args.test_pred_file.expanduser()}
+            {test_pred_file.expanduser()}
         """)
 
-    train_shard_path = args.sp_train_file.expanduser()
-    tgt_train_folder = str(train_shard_path) + '_' + suffix
+    train_shard_path = sp_train_file.expanduser()
+    tgt_train_folder = Path(str(train_shard_path) + '_' + suffix)
     print(f'writing to {tgt_train_folder}')
     os.system(f"cp -r {train_shard_path} {tgt_train_folder}")
 
-    for examples_file in Path(tgt_train_folder).glob('*.jsonl'):
+    for examples_file in tgt_train_folder.glob('*.jsonl'):
         print(examples_file)
         load_relation_prediction_results_to_examples(examples_file,
                                                      model_dir / 'wtq.train_dev.rel_prediction.jsonl.prediction')
 
-    test_examples_file = args.sp_test_file.expanduser()
+    test_examples_file = sp_test_file.expanduser()
     tgt_test_file = Path(str(test_examples_file) + '_' + suffix)
     print(f'writing to {tgt_test_file}')
     os.system(f"cp {test_examples_file} {tgt_test_file}")
 
     load_relation_prediction_results_to_examples(tgt_test_file,
                                                  model_dir / 'wtq.test.rel_prediction.jsonl.prediction')
+
+    return tgt_train_folder, tgt_test_file
 
 
 def load_wtq_relation_prediction_results(args):
