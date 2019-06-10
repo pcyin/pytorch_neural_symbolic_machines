@@ -1,4 +1,5 @@
 import argparse
+import sys
 from pathlib import Path
 import os
 
@@ -16,6 +17,8 @@ def train(args):
     os.chdir(pwd)
 
     nsm_work_dir = args.work_dir
+    nsm_work_dir.mkdir(parents=True, exist_ok=True)
+
     cmd = f"""
             OMP_NUM_THREADS=1 \
             python -m table.experiments \
@@ -25,6 +28,7 @@ def train(args):
                 --extra-config='{{"train_shard_dir": "{new_train_folder}", "dev_file": "{new_train_folder / 'dev_split.jsonl'}"}}' \
                 --config=table/config.rel_annot.json 2>{nsm_work_dir / 'err.log'}
         """
+    print(cmd, file=sys.stderr)
     os.system(cmd)
 
     cmd = f"""
@@ -36,6 +40,7 @@ def train(args):
                 --test-file={new_test_file} \
                 --save-decode-to={nsm_work_dir / 'decode.test.json'} 2>{nsm_work_dir / 'err.test.log'}
         """
+    print(cmd, file=sys.stderr)
     os.system(cmd)
 
 
