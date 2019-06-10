@@ -1,9 +1,15 @@
+import sys
+from pathlib import Path
+import json
+
 import torch
 from torch_scatter import scatter_max, scatter_add, scatter_mean
 import torch.nn as nn
 
-from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel
+from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel, BertConfig
 from torch.nn import CrossEntropyLoss, BCEWithLogitsLoss
+
+from table.bert.relation_predictor import CONFIG_NAME
 
 NEGATIVE_NUMBER = -1e8
 
@@ -24,6 +30,25 @@ class BERTRelationIdentificationModel(BertPreTrainedModel):
             'output_dropout_prob': 0.1,
             'column_representation': 'max_pooling'
         }
+
+    @classmethod
+    def build(cls, model_path):
+        if isinstance(model_path, str):
+            model_path = Path(model_path)
+
+        output_config_file = model_path.parent / CONFIG_NAME
+        print(f'BERT config file: {output_config_file}', file=sys.stderr)
+        bert_config = BertConfig(str(output_config_file))
+
+        config_file = model_path.parent / 'config.json'
+        print(f'Model config file: {config_file}', file=sys.stderr)
+        config = json.load(config_file.open())
+        model = cls(bert_config, **config)
+
+        print(f'model file: {model_path}', file=sys.stderr)
+        model.load_state_dict(torch.load(str(model_path), map_location=lambda storage, location: storage))
+
+        return model
 
     def get_column_representation(self,
                                   flattened_column_encoding: torch.Tensor,

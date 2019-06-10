@@ -2,9 +2,11 @@ import argparse
 import json
 import os
 import glob
+from pathlib import Path
 
 
 def load_jsonl(file_path):
+    file_path = Path(file_path)
     data = []
     for line in open(file_path):
         entry = json.loads(line)
@@ -79,7 +81,7 @@ def dump_wtq_data_to_bert_input(example_file, table_file, valid_example_ids=None
 
 def load_relation_prediction_results_to_examples(example_file, relation_prediction_result_file):
     examples = load_jsonl(example_file)
-    rel_pred_results = json.load(open(relation_prediction_result_file))
+    rel_pred_results = json.load(relation_prediction_result_file.open())
 
     def _get_matched_props(_column_name, _prop_features):
         _column_name = _column_name.replace(' ', '_')
@@ -103,7 +105,7 @@ def load_relation_prediction_results_to_examples(example_file, relation_predicti
                 is_triggered = annotation['prediction']
                 example['prop_features'][prop] = [example['prop_features'][prop][0], is_triggered * 1]
 
-    with open(example_file, 'w') as f:
+    with example_file.open('w') as f:
         for example in examples:
             json_str = json.dumps(example)
             f.write(json_str + '\n')
@@ -127,12 +129,24 @@ def main():
     write_parser.add_argument('--test-examples-file', type=str, required=True)
     write_parser.add_argument('--work-dir', type=str, required=True)
 
+    sub_parser = sub_parsers.add_parser('predict_and_generate_parsing_data')
+    sub_parser.set_defaults(which='predict_and_generate_parsing_data')
+    sub_parser.add_argument('--model-path', type=Path, required=True)
+
+    sub_parser.add_argument('--train-pred-file', type=Path, required=True)
+    sub_parser.add_argument('--test-pred-file', type=Path, required=True)
+
+    sub_parser.add_argument('--sp-train-file', type=Path, required=True)
+    sub_parser.add_argument('--sp-test-file', type=Path, required=True)
+
     args = parser.parse_args()
 
     if args.which == 'input':
         dump_wtq_dataset_for_relation_prediction(args)
     elif args.which == 'write':
         load_wtq_relation_prediction_results(args)
+    elif args.which == 'predict_and_generate_parsing_data':
+        predict_relations_and_dump_results(args)
 
 
 def dump_wtq_dataset_for_relation_prediction(args):
@@ -144,6 +158,41 @@ def dump_wtq_dataset_for_relation_prediction(args):
 
     test_examples = dump_wtq_data_to_bert_input(os.path.expanduser(args.test_examples_file), os.path.expanduser(args.test_tables_file))
     write_jsonl(test_examples, os.path.join(os.path.expanduser(args.work_dir), 'wtq.test.rel_prediction.jsonl'))
+
+
+def predict_relations_and_dump_results(args):
+    model_path = args.model_path
+    model_dir = model_path.parent
+
+    os.system(f"""
+    python relation_predictor.py test \
+        {model_path} \
+        {args.train_pred_file.expanduser()}
+    """)
+
+    os.system(f"""
+        python relation_predictor.py test \
+            {model_path} \
+            {args.test_pred_file.expanduser()}
+        """)
+
+    train_shard_path = args.sp_train_file.expanduser()
+    tgt_train_folder = str(train_shard_path) + '_' + model_path.name
+    print(f'writing to {tgt_train_folder}')
+    os.system(f"cp -r {train_shard_path} {tgt_train_folder}")
+
+    for examples_file in Path(tgt_train_folder).glob('*.jsonl'):
+        print(examples_file)
+        load_relation_prediction_results_to_examples(examples_file,
+                                                     model_dir / 'wtq.train_dev.rel_prediction.jsonl.prediction')
+
+    test_examples_file = args.sp_test_file.expanduser()
+    tgt_test_file = Path(str(test_examples_file) + '_' + model_path.name)
+    print(f'writing to {tgt_test_file}')
+    os.system(f"cp {test_examples_file} {tgt_test_file}")
+
+    load_relation_prediction_results_to_examples(tgt_test_file,
+                                                 model_dir / 'wtq.test.rel_prediction.jsonl.prediction')
 
 
 def load_wtq_relation_prediction_results(args):
