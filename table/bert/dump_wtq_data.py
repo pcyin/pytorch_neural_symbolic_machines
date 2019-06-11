@@ -168,9 +168,9 @@ def predict_relations_and_dump_results(model_path: Path,
                                        train_pred_file: Path,
                                        test_pred_file: Path,
                                        sp_train_file: Path,
-                                       sp_test_file: Path):
+                                       sp_test_file: Path,
+                                       suffix: str):
     model_dir = model_path.parent
-    suffix = model_dir.name
 
     os.system(f"""
     python relation_predictor.py test \
