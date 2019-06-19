@@ -32,28 +32,31 @@ def train(args):
         # train NSM using new BERT predictions
         nsm_work_dir = Path(str(args.work_dir) + f'_epoch{epoch}')
         nsm_work_dir.mkdir(exist_ok=True, parents=True)
-        os.system(f"""
-            OMP_NUM_THREADS=1 \
-            python -m table.experiments \
-                train \
-                --cuda \
-                --work-dir={nsm_work_dir} \
-                --extra-config='{{"train_shard_dir": "{new_sp_train_folder}", "dev_file": "{new_sp_train_folder / 'dev_split.jsonl'}"}}' \
-                --config=table/config.rel_annot.json 2>{nsm_work_dir / 'err.log'}
-        """)
+
+        if not (nsm_work_dir / 'model.best.bin').exists():
+            os.system(f"""
+                OMP_NUM_THREADS=1 \
+                python -m table.experiments \
+                    train \
+                    --cuda \
+                    --work-dir={nsm_work_dir} \
+                    --extra-config='{{"train_shard_dir": "{new_sp_train_folder}", "dev_file": "{new_sp_train_folder / 'dev_split.jsonl'}"}}' \
+                    --config=table/config.rel_annot.json 2>{nsm_work_dir / 'err.log'}
+            """)
 
         # dump NSM predictions for BERT training
         for (tag, test_file, decode_save_file) in [('train', new_sp_train_folder / 'train_split.jsonl', nsm_work_dir / 'decode.train.json'),
                                                    ('test', new_sp_test_file, nsm_work_dir / 'decode.test.json')]:
-            os.system(f"""
-                        OMP_NUM_THREADS=1 \
-                        python -m table.experiments \
-                            test \
-                            --cuda \
-                            --model={nsm_work_dir / 'model.best.bin'} \
-                            --test-file={test_file} \
-                            --save-decode-to={decode_save_file} 2>{nsm_work_dir / ('err.' + tag + '.log')}
-            """)
+            if not decode_save_file.exists():
+                os.system(f"""
+                            OMP_NUM_THREADS=1 \
+                            python -m table.experiments \
+                                test \
+                                --cuda \
+                                --model={nsm_work_dir / 'model.best.bin'} \
+                                --test-file={test_file} \
+                                --save-decode-to={decode_save_file} 2>{nsm_work_dir / ('err.' + tag + '.log')}
+                """)
 
         # NSM predictions to BERT training files
         triggered_columns = {}
