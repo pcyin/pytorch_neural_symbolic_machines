@@ -9,26 +9,26 @@ from table.bert.dump_wtq_data import predict_relations_and_dump_results, dump_wt
 def train(args):
     pwd = os.getcwd()
 
-    suffix = args.bert_model_path.parent.name + f'_seed{args.seed}'
-    nsm_work_dir = Path('output') / suffix
+    suffix = args.bert_model_path.parent.name
+    nsm_work_dir = Path('output') / (suffix + f'_consistency_parserseed{args.seed}')
     nsm_work_dir.mkdir(parents=True, exist_ok=True)
-
-    new_train_folder = Path(str(args.sp_train_file) + '_' + suffix)
-    new_test_file = Path(str(args.sp_test_file) + '_' + suffix)
 
     print(f'| Work dir: {nsm_work_dir}', file=sys.stderr)
     print(f'| TableBERT model: {args.bert_model_path}', file=sys.stderr)
     sys.stderr.flush()
 
-    # if not new_train_folder.exists() or not new_test_file.exists():
-    os.chdir('table/bert')
-    new_train_folder, new_test_file = predict_relations_and_dump_results(args.bert_model_path,
-                                                                         args.train_pred_file,
-                                                                         args.test_pred_file,
-                                                                         args.sp_train_file,
-                                                                         args.sp_test_file,
-                                                                         suffix=suffix)
-    os.chdir(pwd)
+    new_train_folder = Path(str(args.sp_train_file) + '_' + suffix)
+    new_test_file = Path(str(args.sp_test_file) + '_' + suffix)
+
+    if not (new_train_folder.exists() and new_test_file.exists()):
+        os.chdir('table/bert')
+        new_train_folder, new_test_file = predict_relations_and_dump_results(args.bert_model_path,
+                                                                             args.train_pred_file,
+                                                                             args.test_pred_file,
+                                                                             args.sp_train_file,
+                                                                             args.sp_test_file,
+                                                                             suffix=suffix)
+        os.chdir(pwd)
 
     cmd = f"""
             OMP_NUM_THREADS=1 \
@@ -37,8 +37,8 @@ def train(args):
                 --seed {args.seed} \
                 --cuda \
                 --work-dir={nsm_work_dir} \
-                --extra-config='{{"train_shard_dir": "{new_train_folder}", "dev_file": "{new_train_folder / 'dev_split.jsonl'}", "max_train_step": 15000}}' \
-                --config=table/config.rel_annot.json 2>{nsm_work_dir / 'err.log'}
+                --extra-config='{{"train_shard_dir": "{new_train_folder}", "dev_file": "{new_train_folder / 'dev_split.jsonl'}", "max_train_step": 22000}}' \
+                --config=table/config.rel_annot.consistency.json 2>{nsm_work_dir / 'err.log'}
         """
     print(cmd, file=sys.stderr)
     os.system(cmd)

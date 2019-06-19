@@ -16,7 +16,8 @@ def load_jsonl(file_path):
 
 
 def write_jsonl(data, file_path):
-    with open(file_path, 'w') as f:
+    file_path = Path(file_path)
+    with file_path.open('w') as f:
         for example in data:
             json_str = json.dumps(example)
             f.write(json_str + '\n')
@@ -172,17 +173,19 @@ def predict_relations_and_dump_results(model_path: Path,
                                        suffix: str):
     model_dir = model_path.parent
 
-    os.system(f"""
-    python relation_predictor.py test \
-        {model_path} \
-        {train_pred_file.expanduser()}
-    """)
-
-    os.system(f"""
+    if not Path(model_dir / 'wtq.train_dev.rel_prediction.jsonl.prediction').exists():
+        os.system(f"""
         python relation_predictor.py test \
             {model_path} \
-            {test_pred_file.expanduser()}
+            {train_pred_file.expanduser()}
         """)
+
+    if not Path(model_dir / 'wtq.test.rel_prediction.jsonl.prediction').exists():
+        os.system(f"""
+            python relation_predictor.py test \
+                {model_path} \
+                {test_pred_file.expanduser()}
+            """)
 
     train_shard_path = sp_train_file.expanduser()
     tgt_train_folder = Path(str(train_shard_path) + '_' + suffix)
