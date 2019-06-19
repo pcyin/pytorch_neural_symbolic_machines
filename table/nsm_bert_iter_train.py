@@ -97,7 +97,7 @@ def train(args):
 
         os.system(f"""
                    python relation_predictor.py train \
-                        --extra-config='{{"pretrained_model_path": "{prev_bert_dir / 'pytorch_model.bin'}", "data": {{ "train_file": "{bert_train_file}" }}, "output_dropout_prob": 0.1}}' \
+                        --extra-config='{{"pretrained_model_path": "{prev_bert_dir / 'pytorch_model.bin'}", "data": {{ "train_file": "{bert_train_file}", "dev_file": "{args.bert_init_pred_file_test}" }}, "output_dropout_prob": 0.1}}' \
                         --seed=0 \
                         --work-dir={bert_dir_for_cur_epoch} \
                         config.local.json
