@@ -2,6 +2,7 @@ import heapq
 import math
 import os
 import random
+import re
 import sys
 import time
 import json
@@ -414,3 +415,12 @@ class Actor(Process):
             return True
         else:
             return False
+
+    def get_global_step(self):
+        if not self.model_path:
+            return 0
+
+        model_name = self.model_path.split('/')[-1]
+        train_iter = re.search('iter(\d+)?', model_name).group(1)
+
+        return int(train_iter)

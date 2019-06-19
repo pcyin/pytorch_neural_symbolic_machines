@@ -131,6 +131,10 @@ class Evaluator(Process):
             return False
 
     def get_global_step(self):
-        train_iter = re.search('iter(\d+)?', self.model_path).group(1)
+        if not self.model_path:
+            return 0
+
+        model_name = self.model_path.split('/')[-1]
+        train_iter = re.search('iter(\d+)?', model_name).group(1)
 
         return int(train_iter)
