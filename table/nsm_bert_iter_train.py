@@ -40,7 +40,7 @@ def train(args):
                     train \
                     --cuda \
                     --work-dir={nsm_work_dir} \
-                    --extra-config='{{"train_shard_dir": "{new_sp_train_folder}", "dev_file": "{new_sp_train_folder / 'dev_split.jsonl'}"}}' \
+                    --extra-config='{{"train_shard_dir": "{new_sp_train_folder}", "dev_file": "{new_sp_train_folder / 'dev_split.jsonl'}", "max_train_step": 18000}}' \
                     --config=table/config.rel_annot.json 2>{nsm_work_dir / 'err.log'}
             """)
 
