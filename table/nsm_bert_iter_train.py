@@ -70,6 +70,7 @@ def train(args):
                 program = to_human_readable_program(program, env)
                 _triggered_columns = set()
                 for token in program:
+                    token = str(token)
                     if token.startswith('r.'):
                         _triggered_columns.add(token)
 
