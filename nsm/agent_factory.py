@@ -676,6 +676,9 @@ class PGAgent(nn.Module):
         return samples
 
     def sample(self, environments, sample_num, use_cache=False):
+        if sample_num == 0:
+            return []
+
         if use_cache:
             # if already explored everything, then don't explore this environment anymore.
             environments = [env for env in environments if not env.cache.is_full()]
