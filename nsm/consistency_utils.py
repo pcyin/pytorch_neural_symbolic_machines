@@ -115,7 +115,7 @@ class ConsistencyModel(object):
                     consistency_score = q_sim * program_sim * nn_program_prob # (1 / nn_hyp_j['norm_prob'])
                     support_i += consistency_score
 
-                    if debug:
+                    if debug and program_sim > 0:
                         nn_program = nn_hyp_j['program']
                         nn_program = ' '.join(nn_program)
                         print(f'Similiar Program {j}: {nn_program}', file=f_log)

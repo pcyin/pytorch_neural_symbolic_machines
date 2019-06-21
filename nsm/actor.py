@@ -228,7 +228,7 @@ class Actor(Process):
         self.checkpoint_queue = None
         self.train_queue = None
         self.shared_program_cache = shared_program_cache
-        self.consistency_model = None
+        self.consistency_model: ConsistencyModel = None
 
     @property
     def use_consistency_model(self):
@@ -330,6 +330,12 @@ class Actor(Process):
                         self.replay_buffer.save_samples(non_replay_samples)
 
                         for sample in non_replay_samples:
+                            if self.use_consistency_model and self.consistency_model.debug:
+                                print(f'>>>>>>>>>> non replay samples for {sample.trajectory.environment_name}', file=self.consistency_model.log_file)
+                                self.consistency_model.compute_consistency_score(sample.trajectory.environment_name, [sample])
+                                print(f'<<<<<<<<<<< non replay samples for {sample.trajectory.environment_name}',
+                                      file=self.consistency_model.log_file)
+
                             replay_samples_prob = self.replay_buffer.env_program_prob_sum_dict.get(sample.trajectory.environment_name, 0.)
                             if replay_samples_prob > 0.:
                                 # clip the sum of probabilities for replay samples if the replay buffer is not empty
