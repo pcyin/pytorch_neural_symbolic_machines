@@ -5,6 +5,8 @@ import editdistance
 import numpy as np
 import sys
 
+import torch
+
 from nsm.agent_factory import Sample
 from nsm.env_factory import QAProgrammingEnv
 from nsm.program_cache import SharedProgramCache
@@ -22,7 +24,7 @@ class QuestionSimilarityModel(object):
 
     @classmethod
     def load(cls, file_path):
-        data = json.load(open(file_path))
+        data = torch.load(file_path)['similar_questions']
         # for v in data.values():
         #     for x in v:
         #         del x['question']
