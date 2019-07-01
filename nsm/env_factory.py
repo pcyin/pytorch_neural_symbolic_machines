@@ -1,6 +1,6 @@
 "A collections of environments of sequence generations tasks."
 import sys
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Union
 import collections
 import pprint
 import numpy as np
@@ -295,7 +295,8 @@ class QAProgrammingEnv(Environment):
                                 constant_spans=constant_spans,
                                 constant_value_embeddings=constant_value_embeddings,
                                 question_features=question_annotation['features'],
-                                question_tokens=tokens)
+                                question_tokens=tokens,
+                                table=question_annotation['table'])
 
         # Create output features.
         if id_feature_dict:
@@ -515,3 +516,20 @@ class SearchCache(object):
     def reset(self):
         self._set = bloom_filter.BloomFilter(
             max_elements=self.max_elements, error_rate=self.error_rate)
+
+
+class Sample(object):
+    def __init__(self, trajectory: Trajectory, prob: Union[float, torch.Tensor]):
+        self.trajectory = trajectory
+        self.prob = prob
+
+    def to(self, device: torch.device):
+        for ob in self.trajectory.observations:
+            ob.to(device)
+
+        return self
+
+    def __repr__(self):
+        return 'Sample({}, prob={})'.format(self.trajectory, self.prob)
+
+    __str__ = __repr__

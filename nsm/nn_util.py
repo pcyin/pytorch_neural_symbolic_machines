@@ -1,4 +1,5 @@
 import math
+import random
 
 import torch
 import numpy as np
@@ -168,3 +169,13 @@ def sort_batch_by_length(tensor: torch.Tensor, sequence_lengths: torch.Tensor):
     _, reverse_mapping = permutation_index.sort(0, descending=False)
     restoration_indices = index_range.index_select(0, reverse_mapping)
     return sorted_tensor, sorted_sequence_lengths, restoration_indices, permutation_index
+
+
+def init_random_seed(seed, device: torch.device):
+    random.seed(seed)
+    torch.manual_seed(seed * 29 // 7)
+    np.random.seed(seed * 13 // 7)
+
+    # create agent
+    if 'cuda' in device.type:
+        torch.cuda.manual_seed(seed * 29 // 7)

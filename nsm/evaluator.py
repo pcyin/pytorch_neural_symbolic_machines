@@ -6,9 +6,12 @@ from typing import List, Union
 import numpy as np
 from tensorboardX import SummaryWriter
 
-from nsm.agent_factory import Sample, PGAgent
-from nsm.env_factory import QAProgrammingEnv
+from nsm import nn_util
+from nsm.agent_factory import PGAgent
+from nsm.consistency_utils import ConsistencyModel, QuestionSimilarityModel
+from nsm.env_factory import QAProgrammingEnv, Sample
 
+import torch.multiprocessing as torch_mp
 from multiprocessing import Queue, Process
 
 import torch
@@ -17,7 +20,7 @@ from nsm.dist_util import STOP_SIGNAL
 
 class Evaluation(object):
     @staticmethod
-    def evaluate(model: PGAgent, dataset: List[QAProgrammingEnv], beam_size: int):
+    def evaluate(model, dataset: List[QAProgrammingEnv], beam_size: int):
         was_training = model.training
         model.eval()
 
@@ -50,21 +53,27 @@ class Evaluation(object):
         return eval_result
 
 
-class Evaluator(Process):
-    def __init__(self, config, eval_file, gpu_id=-1):
+class Evaluator(torch_mp.Process):
+    def __init__(self, config, eval_file, device):
         super(Evaluator, self).__init__(daemon=True)
         self.eval_queue = Queue()
         self.config = config
         self.eval_file = eval_file
-        self.gpu_id = gpu_id
+        self.device = device
 
         self.model_path = 'INIT_MODEL'
         self.message_var = None
 
     def run(self):
-        self.agent = PGAgent.build(self.config).eval()
-        if self.gpu_id >= 0:
-            self.agent = self.agent.to(torch.device("cuda", self.gpu_id))
+        # initialize cuda context
+        self.device = torch.device(self.device)
+        if 'cuda' in self.device.type:
+            torch.cuda.set_device(self.device)
+
+        # seed the random number generators
+        nn_util.init_random_seed(self.config['seed'], self.device)
+
+        self.agent = PGAgent.build(self.config).to(self.device).eval()
 
         self.load_environments()
         summary_writer = SummaryWriter(os.path.join(self.config['work_dir'], 'tb_log/dev'))
@@ -103,7 +112,8 @@ class Evaluator(Process):
                                  table_file=self.config['table_file'],
                                  vocab_file=self.config['vocab_file'],
                                  en_vocab_file=self.config['en_vocab_file'],
-                                 embedding_file=self.config['embedding_file'])
+                                 embedding_file=self.config['embedding_file'],
+                                 bert_model=self.config['bert_model'])
         for env in envs:
             env.use_cache = False
             env.punish_extra_work = False

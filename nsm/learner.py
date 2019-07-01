@@ -4,20 +4,22 @@ import os
 import random
 import time
 from itertools import chain
-from typing import List
+from typing import List, Dict
 
 import numpy as np
 import sys
 
+import torch.multiprocessing as torch_mp
 import multiprocessing
-from multiprocessing import Process
+
+from pytorch_pretrained_bert import BertAdam
 
 from nsm import nn_util
-from nsm.agent_factory import PGAgent, Sample
-from nsm.env_factory import Trajectory
+from nsm.agent_factory import PGAgent
+from nsm.consistency_utils import ConsistencyModel, QuestionSimilarityModel
+from nsm.retrainer import Retrainer, load_nearest_neighbors
 from nsm.evaluator import Evaluation
 from nsm.program_cache import SharedProgramCache
-from nsm.retrainer import Retrainer, load_nearest_neighbors
 
 import torch
 from tensorboardX import SummaryWriter
@@ -25,14 +27,14 @@ from tensorboardX import SummaryWriter
 from nsm.dist_util import STOP_SIGNAL
 
 
-class Learner(Process):
-    def __init__(self, config, gpu_id=-1, shared_program_cache: SharedProgramCache = None):
+class Learner(torch_mp.Process):
+    def __init__(self, config: Dict, device: torch.device, shared_program_cache: SharedProgramCache = None):
         super(Learner, self).__init__(daemon=True)
 
         self.train_queue = multiprocessing.Queue()
         self.checkpoint_queue = multiprocessing.Queue()
         self.config = config
-        self.gpu_id = gpu_id
+        self.device = device
         self.actor_message_vars = []
         self.current_model_path = None
         self.shared_program_cache = shared_program_cache
@@ -40,23 +42,47 @@ class Learner(Process):
         self.actor_num = 0
 
     def run(self):
-        # create agent
-        self.agent = PGAgent.build(self.config).train()
-        if self.gpu_id >= 0:
-            self.agent = self.agent.to(torch.device("cuda", self.gpu_id))
+        # initialize cuda context
+        self.device = torch.device(self.device)
+
+        if 'cuda' in self.device.type:
+            torch.cuda.set_device(self.device)
+
+        # seed the random number generators
+        nn_util.init_random_seed(self.config['seed'], self.device)
+
+        self.agent = PGAgent.build(self.config).to(self.device).train()
 
         self.train()
 
     def train(self):
         model = self.agent
-        train_iter = 0
-        save_every_niter = self.config['save_every_niter']
-        method = self.config['method']
-        entropy_reg_weight = self.config['entropy_reg_weight']
-        summary_writer = SummaryWriter(os.path.join(self.config['work_dir'], 'tb_log/train'))
-        params = [p for p in model.parameters() if p.requires_grad]
-        optimizer = torch.optim.Adam(params, lr=0.001)
         config = self.config
+        train_iter = 0
+        save_every_niter = config['save_every_niter']
+        entropy_reg_weight = config['entropy_reg_weight']
+        summary_writer = SummaryWriter(os.path.join(config['work_dir'], 'tb_log/train'))
+
+        no_grad = ['pooler']
+        param_optimizer = list([(p_name, p)
+                                for (p_name, p) in model.encoder.bert_model.named_parameters()
+                                if not any(pn in p_name for pn in no_grad)])
+        no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+        bert_grouped_parameters = [
+            {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)],
+             'weight_decay': 0.01},
+            {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+        ]
+        num_train_optimization_steps = 15000
+
+        bert_optimizer = BertAdam(
+            bert_grouped_parameters,
+            lr=self.config['bert_learning_rate'],
+            warmup=0.1,
+            t_total=num_train_optimization_steps)
+
+        other_params = [p for n, p in model.named_parameters() if 'encoder.bert_model' not in n and p.requires_grad]
+        optimizer = torch.optim.Adam(other_params, lr=0.001)
         use_finetune = config['use_finetune']
 
         cum_loss = cum_examples = 0.
@@ -91,17 +117,10 @@ class Learner(Process):
 
         max_batch_size = self.config['batch_size'] * (self.config['n_replay_samples'] + self.config['n_policy_samples'])
 
-        nn_util.glorot_init(params)
-        torch.nn.init.zeros_(model.decoder.output_feature_linear.weight)
-        torch.nn.init.normal_(model.encoder.context_embedder.trainable_embedding.weight, mean=0., std=0.1)
-        torch.nn.init.normal_(model.decoder.builtin_func_embeddings.weight, mean=0., std=0.1)
-
-        # set forget gate bias to 1, as in tensorflow
-        for name, p in chain(model.decoder.rnn_cell.named_parameters(), model.encoder.lstm_encoder.named_parameters()):
-            if 'bias' in name:
-                n = p.size(0)
-                forget_start_idx, forget_end_idx = n // 4, n // 2
-                p.data[forget_start_idx:forget_end_idx].fill_(1.)
+        # nn_util.glorot_init(params)
+        # torch.nn.init.zeros_(model.decoder.output_feature_linear.weight)
+        # torch.nn.init.normal_(model.encoder.context_embedder.trainable_embedding.weight, mean=0., std=0.1)
+        # torch.nn.init.normal_(model.decoder.builtin_func_embeddings.weight, mean=0., std=0.1)
 
         max_train_step = config['max_train_step']
         while train_iter < max_train_step:
@@ -139,9 +158,11 @@ class Learner(Process):
             loss_val = loss.item()
 
             # clip gradient
-            grad_norm = torch.nn.utils.clip_grad_norm_(params, 5.)
+            grad_norm = torch.nn.utils.clip_grad_norm_(other_params, 5.)
 
             optimizer.step()
+            bert_optimizer.step()
+            bert_optimizer.zero_grad()
 
             # print(f'[Learner] train_iter={train_iter} loss={loss_val}', file=sys.stderr)
             del loss

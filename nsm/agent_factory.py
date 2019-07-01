@@ -3,41 +3,28 @@ import collections
 import heapq
 import itertools
 import math
-from collections import OrderedDict, namedtuple
+from collections import OrderedDict
 import json
 import sys
-from typing import List, Dict, Tuple, Union, Optional
+from typing import List, Dict, Tuple, Union, Any
 import numpy as np
+from pytorch_pretrained_bert import BertTokenizer
 from tqdm import tqdm
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.modules.rnn import RNNCellBase
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from nsm import nn_util, data_utils
 from nsm.embedding import EmbeddingModel, Embedder
-from nsm.env_factory import Observation, Trajectory, Environment, QAProgrammingEnv
+from nsm.env_factory import Observation, Trajectory, QAProgrammingEnv, Sample
 
 # Sample = collections.namedtuple('Sample', ['trajectory', 'prob'])
+from table.bert.model import TableBERT
+from table.bert.data_model import Example
 
-
-class Sample(object):
-    def __init__(self, trajectory: Trajectory, prob: Union[float, torch.Tensor]):
-        self.trajectory = trajectory
-        self.prob = prob
-
-    def to(self, device: torch.device):
-        for ob in self.trajectory.observations:
-            ob.to(device)
-
-        return self
-
-    def __repr__(self):
-        return 'Sample({}, prob={})'.format(self.trajectory, self.prob)
-
-    __str__ = __repr__
+ContextEncoding = Dict[str, torch.Tensor]
 
 
 Hypothesis = collections.namedtuple('Hypothesis', ['env', 'score'])
@@ -55,13 +42,416 @@ class DecoderState(object):
         return DecoderState(sliced_state, sliced_memory)
 
 
-class Encoder(nn.Module):
+class EncoderBase(nn.Module):
+    def __init__(self,
+                 output_size: int,
+                 max_variable_num_on_memory: int):
+        nn.Module.__init__(self)
+
+        self.output_size = output_size
+        self.max_variable_num_on_memory = max_variable_num_on_memory
+
+    def encode(self, examples: List) -> Dict:
+        raise NotImplementedError
+
+
+class DecoderBase(nn.Module):
+    def __init__(self,
+                 memory_size,
+                 mem_item_embed_size,
+                 constant_value_embed_size,
+                 builtin_func_num,
+                 encoder_output_size):
+        nn.Module.__init__(self)
+
+        self.memory_size = memory_size
+        self.mem_item_embed_size = mem_item_embed_size
+        self.constant_value_embed_size = constant_value_embed_size
+        self.builtin_func_num = builtin_func_num
+        self.encoder_output_size = encoder_output_size
+
+    def step(self):
+        pass
+
+
+class BertEncoder(EncoderBase):
+    def __init__(self,
+                 table_bert_model,
+                 output_size: int,
+                 question_feat_size: int,
+                 max_variable_num_on_memory: int,
+                 dropout: float = 0.):
+        EncoderBase.__init__(self, output_size, max_variable_num_on_memory)
+
+        self.bert_model = table_bert_model
+        self.question_feat_size = question_feat_size
+        self.max_variable_num_on_memory = max_variable_num_on_memory
+        self.dropout = nn.Dropout(dropout)
+
+        self.bert_output_project = nn.Linear(
+            self.bert_model.output_size + self.question_feat_size,
+            self.output_size, bias=False
+        )
+
+        self.bert_table_output_project = nn.Linear(
+            self.bert_model.output_size, self.output_size, bias=False
+        )
+
+        self.question_encoding_att_value_to_key = nn.Linear(
+            self.output_size,
+            self.output_size, bias=False
+        )
+
+        self.init_weights()
+
+    def init_weights(self):
+        def _init_weights(module):
+            if isinstance(module, (nn.Linear, nn.Embedding)):
+                module.weight.data.normal_(mean=0.0, std=self.bert_model.config.initializer_range)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                module.bias.data.zero_()
+
+        self.bert_output_project.apply(_init_weights)
+        self.bert_table_output_project.apply(_init_weights)
+        self.question_encoding_att_value_to_key.apply(_init_weights)
+
+    @classmethod
+    def build(cls, config):
+        bert_model = TableBERT.from_pretrained(
+            config['bert_model'],
+            tokenizer=BertTokenizer.from_pretrained(config['bert_model'])
+        )
+
+        return cls(
+            bert_model,
+            output_size=config['hidden_size'],
+            question_feat_size=config['n_en_input_features'],
+            max_variable_num_on_memory=config['memory_size'] - config['builtin_func_num'],
+            dropout=config['dropout']
+        )
+
+    def example_list_to_batch(self, env_context: List[Dict]) -> Dict:
+        # self.context = dict(question_word_ids=en_inputs,
+        #                                 constant_spans=constant_spans,
+        #                                 question_features=question_annotation['features'],
+        #                                 question_tokens=tokens,
+        #                                 question_sub_tokens=tokens)
+
+        batch_dict = dict()
+        for key in ('constant_spans', 'question_features'):
+            val_list = [x[key] for x in env_context]
+
+            # (batch_size, max_entry_num, entry_dim)
+            if key == 'question_features':
+                max_entry_num = max(len(val) for val in val_list)
+                dtype = np.float32
+            else:
+                max_entry_num = self.max_variable_num_on_memory
+                dtype = np.int64
+
+            entry_dim = len(val_list[0][0])
+            batch_size = len(env_context)
+
+            batch_value_tensor = np.zeros((batch_size, max_entry_num, entry_dim), dtype=dtype)
+
+            if key == 'constant_spans':
+                batch_value_tensor.fill(-1.)
+
+            for i, val in enumerate(val_list):
+                entry_num = len(val)
+                batch_value_tensor[i, :entry_num] = val
+
+            batch_dict[key] = torch.from_numpy(batch_value_tensor).to(next(self.parameters()).device)
+
+        return batch_dict
+
+    def _bert_encode(self, env_context: List[Dict]) -> Any:
+        question_encoding, table_column_encoding, info = self.bert_model.encode(
+            [Example(question=e['question_tokens'], table=e['table']) for e in env_context]
+        )
+
+        question_encoding = question_encoding[:, 1:]
+        cls_encoding = question_encoding[:, 0]
+        info['cls_encoding'] = cls_encoding
+
+        return question_encoding, table_column_encoding, info
+
+    def encode(self, env_context: List[Dict]) -> ContextEncoding:
+        batched_context = self.example_list_to_batch(env_context)
+
+        question_encoding, table_column_encoding, info = self._bert_encode(env_context)
+
+        question_encoding = self.bert_output_project(
+            torch.cat([question_encoding,
+                       batched_context['question_features']], dim=-1))
+
+        question_encoding_att_linear = self.question_encoding_att_value_to_key(question_encoding)
+
+        # (batch_size, max_column_num, encoding_size)
+        table_column_encoding = self.bert_table_output_project(table_column_encoding)
+
+        batch_size = len(env_context)
+        max_column_num = table_column_encoding.size(1)
+
+        constant_value_num = batched_context['constant_spans'].size(1)
+        if max_column_num < constant_value_num:
+            constant_value_embedding = torch.cat([
+                table_column_encoding,
+                table_column_encoding.new_zeros(
+                    batch_size, constant_value_num - max_column_num, table_column_encoding.size(-1))],
+                dim=1)
+        else:
+            constant_value_embedding = table_column_encoding[:, :constant_value_num, :]
+
+        context_encoding = {
+            'batch_size': len(env_context),
+            'question_encoding': question_encoding,
+            'cls_encoding': info['cls_encoding'],
+            'question_mask': info['tensor_dict']['question_token_mask'][:, 1:],  # remove learning [CLS] symbol
+            'question_encoding_att_linear': question_encoding_att_linear,
+            'constant_value_embeddings': constant_value_embedding,
+            'constant_spans': batched_context['constant_spans']
+        }
+
+        return context_encoding
+
+
+class BertDecoder(DecoderBase):
+    def __init__(
+        self,
+        mem_item_embed_size: int,
+        constant_value_embed_size: int,
+        encoder_output_size: int,
+        hidden_size: int,
+        num_layers: int,
+        output_feature_num: int,
+        builtin_func_num: int,
+        memory_size: int,
+        encoder: BertEncoder,
+        dropout=0.
+    ):
+        DecoderBase.__init__(
+            self,
+            memory_size,
+            mem_item_embed_size,
+            constant_value_embed_size,
+            builtin_func_num,
+            encoder.output_size
+        )
+
+        self.decoder_cell_init_linear = nn.Linear(
+            encoder.bert_model.config.hidden_size,
+            hidden_size)
+
+        self.rnn_cell = MultiLayerDropoutLSTMCell(
+            mem_item_embed_size, hidden_size,
+            num_layers=num_layers, dropout=dropout)
+
+        self.att_vec_linear = nn.Linear(encoder_output_size + hidden_size, hidden_size, bias=False)
+
+        self.attention_func = self.dot_prod_attention
+
+        # self.constant_value_embedding_linear = nn.Linear(constant_value_embed_size, mem_item_embed_size)
+        self.constant_value_embedding_linear = lambda x: x
+
+        # (builtin_func_num, embed_size)
+        self.builtin_func_embeddings = nn.Embedding(builtin_func_num, mem_item_embed_size)
+
+        self.output_feature_linear = nn.Linear(output_feature_num, 1, bias=False)
+
+        self.dropout = nn.Dropout(dropout)
+
+        self.init_weights()
+
+    def init_weights(self):
+        def _init_weights(module):
+            if isinstance(module, (nn.Linear, nn.Embedding)):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                module.bias.data.zero_()
+
+        self.apply(_init_weights)
+        self.output_feature_linear.weight.data.zero_()
+
+        # set forget gate bias to 1, as in tensorflow
+        for name, p in itertools.chain(self.rnn_cell.named_parameters()):
+            if 'bias' in name:
+                n = p.size(0)
+                forget_start_idx, forget_end_idx = n // 4, n // 2
+                p.data[forget_start_idx:forget_end_idx].fill_(1.)
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    @classmethod
+    def build(cls, config, encoder: BertEncoder) -> 'BertDecoder':
+        return cls(
+            mem_item_embed_size=config['value_embedding_size'],
+            constant_value_embed_size=config['value_embedding_size'],
+            encoder_output_size=config['hidden_size'],
+            hidden_size=config['hidden_size'],
+            num_layers=config['n_layers'],
+            output_feature_num=config['n_de_output_features'],
+            builtin_func_num=config['builtin_func_num'],
+            memory_size=config['memory_size'],
+            encoder=encoder,
+            dropout=config['dropout']
+        )
+
+    def get_lstm_init_state(self, context_encoding: ContextEncoding):
+        # use encoding of the [CLS] token to initialize the decoder
+        question_repr = context_encoding['cls_encoding']
+
+        sc_0_i = self.decoder_cell_init_linear(question_repr)
+        sh_0_i = torch.tanh(sc_0_i)
+
+        decoder_init_states = [(sh_0_i, sc_0_i)] * self.rnn_cell.num_layers
+
+        return decoder_init_states
+
+    def get_initial_state(self, context_encoding: ContextEncoding):
+        # prepare decoder's initial memory and internal LSTM state
+
+        # (batch_size, mem_size, 2)
+        constant_span = context_encoding['constant_spans']
+        # (batch_size, mem_size)
+        constant_span_mask = torch.ge(constant_span, 0)[:, :, 0].float()
+        # mask out entries <= 0
+        constant_span = constant_span * constant_span_mask.unsqueeze(-1).long()
+
+        # (batch_size, max_question_len, encoding_size)
+        question_token_encoding = context_encoding['question_encoding']
+
+        constant_span_size = constant_span.size()
+        mem_size = constant_span_size[1]
+        batch_size = question_token_encoding.size(0)
+
+        # (batch_size, mem_size, 2, embed_size)
+        constant_span_embedding = torch.gather(
+            question_token_encoding.unsqueeze(1).expand(-1, mem_size, -1, -1),
+            index=constant_span.unsqueeze(-1).expand(-1, -1, -1, question_token_encoding.size(-1)),
+            dim=2  # over `max_question_len`
+        )
+
+        # (batch_size, mem_size, embed_size)
+        # constant_span_embedding = self._question_token_span_to_memory_embedding(constant_span_embedding)
+        constant_span_embedding = torch.mean(constant_span_embedding, dim=-2)
+        constant_span_embedding = constant_span_embedding * constant_span_mask.unsqueeze(-1)
+
+        # `constant_value_embedding` consists mostly of table header embedding computed by table BERT
+        # (batch_size, mem_size, embed_size)
+        constant_value_embedding = context_encoding['constant_value_embeddings']
+        constant_value_embedding = self.constant_value_embedding_linear(constant_value_embedding)
+
+        constant_embedding = constant_value_embedding + constant_span_embedding
+
+        # add built-in functional operator embeddings
+        # (batch_size, builtin_func_num, embed_size)
+        builtin_func_embedding = self.builtin_func_embeddings.weight.unsqueeze(0).expand(batch_size, -1, -1)
+        # (batch_size, builtin_func_num + mem_size, embed_size)
+        initial_memory = torch.cat([builtin_func_embedding, constant_embedding], dim=1)[:, :self.memory_size]  # FIXME: clip to max_memory_size
+
+        decoder_init_states = self.get_lstm_init_state(context_encoding)
+
+        state = DecoderState(state=decoder_init_states, memory=initial_memory)
+
+        return state
+
+    def step(self, x: Union[List[Observation], Observation], state_tm1: DecoderState, context_encoding: Dict):
+        """Perform one step of the decoder"""
+
+        # first convert listed input to batched ones
+        if isinstance(x, list):
+            x = Observation.to_batched_input(x, memory_size=self.memory_size).to(self.device)
+
+        batch_size = x.read_ind.size(0)
+
+        # collect y_tm1 as inputs to inner rnn cells
+        # Memory: (batch_size, mem_size, mem_value_dim)
+        # (batch_size, mem_value_dim)
+        input_mem_entry = state_tm1.memory[torch.arange(batch_size, device=self.device), x.read_ind]
+
+        # (batch_size, hidden_size)
+        inner_output_t, inner_state_t = self.rnn_cell(input_mem_entry, state_tm1.state)
+
+        # attention over context
+        ctx_t, alpha_t = self.attention_func(query=inner_output_t,
+                                             keys=context_encoding['question_encoding_att_linear'],
+                                             values=context_encoding['question_encoding'],
+                                             entry_masks=context_encoding['question_mask'])
+
+        # (batch_size, hidden_size)
+        att_t = torch.tanh(self.att_vec_linear(torch.cat([inner_output_t, ctx_t], 1)))  # E.q. (5)
+        # att_t = self.dropout(att_t)
+
+        # compute scores over valid memory entries
+        # memory is organized by:
+        # [built-in functions, constants and variables]
+
+        # dot product attention
+        # (batch_size, mem_size)
+        mem_logits = torch.matmul(state_tm1.memory, att_t.unsqueeze(-1)).squeeze(-1)
+
+        # add output features to logits
+        # (batch_size, mem_size)
+        # print('x.output_features', x.output_features.device, x.output_features.size())
+        # print('self.output_feature_linear', self.output_feature_linear.weight.device)
+        output_feature = self.output_feature_linear(x.output_features).squeeze(-1)
+
+        mem_logits = mem_logits + output_feature
+
+        # write head of shape (batch_size)
+        # mask of shape (batch_size)
+        write_mask = torch.ge(x.write_ind, 0).float()
+        # mask out negative entries in write_ind
+        write_ind = x.write_ind * write_mask.long()
+        # (batch_size, hidden_size)
+        write_value = att_t * write_mask.unsqueeze(-1)
+
+        # write to memory
+        memory_tm1 = state_tm1.memory
+        memory_t = memory_tm1.scatter_add(1, write_ind.view(-1, 1, 1).expand(-1, -1, memory_tm1.size(-1)), write_value.unsqueeze(1))
+
+        state_t = DecoderState(state=inner_state_t, memory=memory_t)
+
+        return mem_logits, state_t
+
+    def step_and_get_action_scores_t(self, observations_t, state_tm1, context_encoding):
+        mem_logits, state_t = self.step(observations_t, state_tm1, context_encoding=context_encoding)
+
+        # (batch_size, mem_size)
+        action_score_t = nn_util.masked_log_softmax(mem_logits, mask=observations_t.valid_action_mask)
+
+        return action_score_t, state_t
+
+    def dot_prod_attention(self,
+                           query: torch.Tensor,
+                           keys: torch.Tensor,
+                           values: torch.Tensor,
+                           entry_masks: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        # (batch_size, src_sent_len)
+        att_weight = torch.bmm(keys, query.unsqueeze(2)).squeeze(2)
+
+        if entry_masks is not None:
+            att_weight.data.masked_fill_((1.0 - entry_masks).byte(), -float('inf'))
+
+        att_prob = F.softmax(att_weight, dim=-1)
+
+        att_view = (att_weight.size(0), 1, att_weight.size(1))
+        # (batch_size, hidden_size)
+        ctx_vec = torch.bmm(att_prob.view(*att_view), values).squeeze(1)
+
+        return ctx_vec, att_prob
+
+
+class LSTMEncoder(nn.Module):
     def __init__(self, question_feat_size, hidden_size, num_layers,
                  max_variable_num_on_memory,
                  context_embedder,
                  output_proj_size,
                  dropout=0.):
-        super(Encoder, self).__init__()
+        super(LSTMEncoder, self).__init__()
 
         self.context_embedder = context_embedder
 
@@ -152,13 +542,13 @@ class Encoder(nn.Module):
                             embed_size=config['en_embedding_size'],
                             pretrained_embedding=pretrained_embeddings)
 
-        encoder = Encoder(question_feat_size=config['n_en_input_features'],
-                          hidden_size=config['hidden_size'],
-                          output_proj_size=config['hidden_size'],
-                          num_layers=config['en_n_layers'],
-                          context_embedder=embedder,
-                          max_variable_num_on_memory=config['memory_size'] - config['builtin_func_num'],
-                          dropout=config['dropout'])
+        encoder = LSTMEncoder(question_feat_size=config['n_en_input_features'],
+                              hidden_size=config['hidden_size'],
+                              output_proj_size=config['hidden_size'],
+                              num_layers=config['en_n_layers'],
+                              context_embedder=embedder,
+                              max_variable_num_on_memory=config['memory_size'] - config['builtin_func_num'],
+                              dropout=config['dropout'])
 
         return encoder
 
@@ -280,7 +670,7 @@ class MultiLayerDropoutLSTMCell(nn.Module):
         return o_i, state
 
 
-class Decoder(nn.Module):
+class LSTMDecoder(nn.Module):
     def __init__(self, mem_item_embed_size,
                  constant_value_embed_size,
                  encoder_hidden_size,
@@ -290,7 +680,7 @@ class Decoder(nn.Module):
                  memory_size,
                  att_type='dot_prod',
                  dropout=0.):
-        super(Decoder, self).__init__()
+        super(LSTMDecoder, self).__init__()
 
         self.memory_size = memory_size
 
@@ -477,22 +867,22 @@ class Decoder(nn.Module):
 
     @staticmethod
     def build(config):
-        return Decoder(mem_item_embed_size=config['value_embedding_size'],
-                       constant_value_embed_size=config['pretrained_embedding_size'],
-                       encoder_hidden_size=config['hidden_size'],
-                       hidden_size=config['hidden_size'],
-                       num_layers=config['n_layers'],
-                       output_feature_num=config['n_de_output_features'],
-                       builtin_func_num=config['builtin_func_num'],
-                       memory_size=config['memory_size'],
-                       att_type=config['attention_type'],
-                       dropout=config['dropout'])
+        return LSTMDecoder(mem_item_embed_size=config['value_embedding_size'],
+                           constant_value_embed_size=config['pretrained_embedding_size'],
+                           encoder_hidden_size=config['hidden_size'],
+                           hidden_size=config['hidden_size'],
+                           num_layers=config['n_layers'],
+                           output_feature_num=config['n_de_output_features'],
+                           builtin_func_num=config['builtin_func_num'],
+                           memory_size=config['memory_size'],
+                           att_type=config['attention_type'],
+                           dropout=config['dropout'])
 
 
 class PGAgent(nn.Module):
     "Agent trained by policy gradient."
 
-    def __init__(self, encoder: Encoder, decoder: Decoder, config: Dict, discount_factor: float = 1.0):
+    def __init__(self, encoder: EncoderBase, decoder: DecoderBase, config: Dict, discount_factor: float = 1.0):
         super(PGAgent, self).__init__()
 
         self.config = config
@@ -507,7 +897,7 @@ class PGAgent(nn.Module):
 
     @property
     def device(self):
-        return self.encoder.device
+        return next(self.parameters()).device
 
     def encode(self, env_context):
         return self.encoder.encode(env_context)
@@ -1054,17 +1444,25 @@ class PGAgent(nn.Module):
 
     @staticmethod
     def build(config, params=None):
-        encoder = Encoder.build(config, params=params)
-        decoder = Decoder.build(config)
+        encoder = BertEncoder.build(config)
+        decoder = BertDecoder.build(config, encoder)
 
         return PGAgent(encoder, decoder, config=config)
 
     def save(self, model_path, kwargs=None):
+        ddp = None
+        if isinstance(self.encoder.bert_model, nn.DataParallel):
+            ddp = self.encoder.bert_model
+            self.encoder.bert_model = ddp.module
+
         params = {
             'config': self.config,
             'state_dict': self.state_dict(),
             'kwargs': kwargs
         }
+
+        if ddp:
+            self.encoder.bert_model = ddp
 
         torch.save(params, model_path)
 

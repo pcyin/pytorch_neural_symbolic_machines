@@ -10,13 +10,13 @@ from typing import List, Dict
 
 import numpy as np
 
-import multiprocessing
+import torch.multiprocessing as torch_mp
 from multiprocessing import Process
 
 from nsm import nn_util
-from nsm.agent_factory import PGAgent, Sample
+from nsm.agent_factory import PGAgent
 from nsm.consistency_utils import ConsistencyModel, QuestionSimilarityModel
-from nsm.env_factory import Trajectory, Environment
+from nsm.env_factory import Trajectory, Environment, Sample
 
 import torch
 
@@ -138,7 +138,7 @@ class ReplayBuffer(object):
 
         return samples
 
-    def replay(self, environments, n_samples=1, use_top_k=False, truncate_at_n=0, replace=True, consistency_model: ConsistencyModel = None):
+    def replay(self, environments, n_samples=1, use_top_k=False, truncate_at_n=0, replace=True, consistency_model = None):
         select_env_names = set([e.name for e in environments])
         trajs = []
 
@@ -150,7 +150,13 @@ class ReplayBuffer(object):
         if len(trajs) == 0:
             return []
 
-        trajectory_probs = self.agent.compute_trajectory_prob(trajs, log=False)
+        # chunk the trajectories, in case there are so many
+        chunk_size = 64
+        trajectory_probs = []
+        for i in range(0, len(trajs), chunk_size):
+            trajs_chunk = trajs[i: i + chunk_size]
+            traj_chunk_probs = self.agent.compute_trajectory_prob(trajs_chunk, log=False)
+            trajectory_probs.extend(traj_chunk_probs)
 
         # Put the samples into an dictionary keyed by env names.
         samples = [Sample(trajectory=t, prob=p) for t, p in zip(trajs, trajectory_probs)]
@@ -209,8 +215,8 @@ class ReplayBuffer(object):
         return replay_samples
 
 
-class Actor(Process):
-    def __init__(self, actor_id, shard_ids, shared_program_cache, config):
+class Actor(torch_mp.Process):
+    def __init__(self, actor_id, shard_ids, shared_program_cache, device, config):
         super(Actor, self).__init__(daemon=True)
 
         # self.checkpoint_queue = checkpoint_queue
@@ -220,6 +226,7 @@ class Actor(Process):
         self.config = config
         self.actor_id = actor_id
         self.shard_ids = shard_ids
+        self.device = device
 
         if not self.shard_ids:
             raise RuntimeError(f'empty shard for Actor {self.actor_id}')
@@ -228,13 +235,21 @@ class Actor(Process):
         self.checkpoint_queue = None
         self.train_queue = None
         self.shared_program_cache = shared_program_cache
-        self.consistency_model: ConsistencyModel = None
+        self.consistency_model = None
 
     @property
     def use_consistency_model(self):
         return self.config['use_consistency_model']
 
     def run(self):
+        # initialize cuda context
+        self.device = torch.device(self.device)
+        if 'cuda' in self.device.type:
+            torch.cuda.set_device(self.device)
+
+        # seed the random number generators
+        nn_util.init_random_seed(self.config['seed'], self.device)
+
         def get_train_shard_path(i):
             return os.path.join(
                 self.config['train_shard_dir'], self.config['train_shard_prefix'] + str(i) + '.jsonl')
@@ -252,8 +267,10 @@ class Actor(Process):
                                                       debug=self.actor_id == 0)
 
         # create agent and set it to evaluation mode
-        self.agent = PGAgent.build(self.config).eval()
-        nn_util.glorot_init(p for p in self.agent.parameters() if p.requires_grad)
+        if 'cuda' in str(self.device.type):
+            torch.cuda.set_device(self.device)
+
+        self.agent = PGAgent.build(self.config).to(self.device).eval()
 
         self.replay_buffer = ReplayBuffer(self.agent, self.shared_program_cache)
 
@@ -390,7 +407,8 @@ class Actor(Process):
                                  table_file=self.config['table_file'],
                                  vocab_file=self.config['vocab_file'],
                                  en_vocab_file=self.config['en_vocab_file'],
-                                 embedding_file=self.config['embedding_file'])
+                                 embedding_file=self.config['embedding_file'],
+                                 bert_model=self.config['bert_model'])
 
         setattr(self, 'environments', envs)
 

@@ -7,8 +7,7 @@ import sys
 
 import torch
 
-from nsm.agent_factory import Sample
-from nsm.env_factory import QAProgrammingEnv
+from nsm.env_factory import QAProgrammingEnv, Sample
 from nsm.program_cache import SharedProgramCache
 
 

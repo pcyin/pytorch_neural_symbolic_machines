@@ -21,14 +21,13 @@ import os
 import sys
 import time
 from collections import OrderedDict
-from typing import List
+from typing import List, Dict
 import ctypes
 import numpy as np
 import torch
-from tensorboardX import SummaryWriter
+from pytorch_pretrained_bert import BertTokenizer
 
-from nsm.actor import Actor, ReplayBuffer
-from nsm.agent_factory import PGAgent
+from nsm.actor import Actor
 from nsm.embedding import EmbeddingModel
 from nsm.env_factory import QAProgrammingEnv
 from nsm.computer_factory import LispInterpreter
@@ -40,13 +39,99 @@ from nsm.evaluator import Evaluator, Evaluation
 from nsm.learner import Learner
 
 import multiprocessing
+
 from docopt import docopt
 
 from nsm.program_cache import SharedProgramCache
 
 
+def annotate_example_for_bert(example: Dict, table: Dict, bert_tokenizer: BertTokenizer):
+    from table.bert.data_model import Table
+    from table.bert.data_model import Column
+
+    e_id = example['id']
+
+    # sub-tokenize the question
+    question_tokens = example['tokens']
+    token_position_map = OrderedDict()   # map of token index before and after sub-tokenization
+
+    question_feature = example['features']
+
+    cur_idx = 0
+    new_question_feature = []
+    question_subtokens = []
+    for old_idx, token in enumerate(question_tokens):
+        if token == '<DECODE>': token = '[MASK]'
+        if token == '<START>': token = '[MASK]'
+
+        sub_tokens = bert_tokenizer.tokenize(token)
+        question_subtokens.extend(sub_tokens)
+
+        token_new_idx_start = cur_idx
+        token_new_idx_end = cur_idx + len(sub_tokens)
+        token_position_map[old_idx] = (token_new_idx_start, token_new_idx_end)
+        new_question_feature.extend([question_feature[old_idx]] * len(sub_tokens))
+
+        cur_idx = token_new_idx_end
+
+    token_position_map[len(question_tokens)] = (len(question_subtokens), len(question_subtokens))
+
+    example['tokens'] = question_subtokens
+    example['features'] = new_question_feature
+
+    for entity in example['entities']:
+        old_token_start = entity['token_start']
+        old_token_end = entity['token_end']
+
+        new_token_start = token_position_map[old_token_start][0]
+        new_token_end = token_position_map[old_token_end][0]
+
+        entity['token_start'] = new_token_start
+        entity['token_end'] = new_token_end
+
+    # parse the table
+    columns = []
+    for raw_column_name in table['props']:
+        column_name = raw_column_name[len('r.'):]
+        type_pos = column_name.rfind('-')
+        column_name = column_name[:type_pos]
+        column_name = column_name.replace('-', ' ').replace('_', ' ')
+
+        type_string = raw_column_name[raw_column_name.rfind('-') + 1:]
+
+        if type_string == 'string':
+            type_string = 'text'
+        elif type_string.startswith('num') or type_string.startswith('date'):
+            type_string = 'real'
+        else:
+            type_string = 'text'
+
+        sample_value = None
+        for row_id, row in table['kg'].items():
+            if raw_column_name in row and isinstance(row[raw_column_name], list) and row[raw_column_name][0] is not None:
+                sample_value = row[raw_column_name][0]
+                break
+        if sample_value is not None:
+            sample_value_tokens = bert_tokenizer.tokenize(str(sample_value))
+        else:
+            sample_value_tokens = []
+
+        column = Column(name=raw_column_name,
+                        type=type_string,
+                        sample_value=sample_value,
+                        name_tokens=bert_tokenizer.tokenize(column_name),
+                        sample_value_tokens=sample_value_tokens)
+
+        columns.append(column)
+
+    table = Table(id=example['context'], header=columns)
+    example['table'] = table
+
+    return example
+
+
 def load_environments(example_files: List[str], table_file: str, vocab_file: str, en_vocab_file: str,
-                      embedding_file: str, column_annotation_file: str = None):
+                      embedding_file: str, column_annotation_file: str = None, bert_model: str = None):
     dataset = []
     for fn in example_files:
         dataset += load_jsonl(fn)
@@ -69,7 +154,13 @@ def load_environments(example_files: List[str], table_file: str, vocab_file: str
     print('{} examples in the dataset'.format(len(dataset)))
 
     # Create environments.
-    environments = create_environments(table_dict, dataset, en_vocab, embedding_model, executor_type='wtq')
+    bert_tokenizer = None
+    if bert_model:
+        bert_tokenizer = BertTokenizer.from_pretrained(bert_model)
+
+    environments = create_environments(
+        table_dict, dataset, en_vocab, embedding_model,
+        executor_type='wtq', bert_tokenizer=bert_tokenizer)
     print('{} environments in total'.format(len(environments)))
 
     return environments
@@ -77,7 +168,8 @@ def load_environments(example_files: List[str], table_file: str, vocab_file: str
 
 def create_environments(table_dict, dataset, en_vocab, embedding_model, executor_type,
                         max_n_mem=60, max_n_exp=3,
-                        pretrained_embedding_size=300):
+                        pretrained_embedding_size=300,
+                        bert_tokenizer=None):
     all_envs = []
 
     if executor_type == 'wtq':
@@ -120,6 +212,9 @@ def create_environments(table_dict, dataset, en_vocab, embedding_model, executor
 
         constant_value_embedding_fn = lambda x: utils.get_embedding_for_constant(x, embedding_model,
                                                                                  embedding_size=pretrained_embedding_size)
+
+        if bert_tokenizer:
+            example = annotate_example_for_bert(example, kg_info, bert_tokenizer)
 
         env = QAProgrammingEnv(en_vocab, de_vocab,
                                question_annotation=example,
@@ -227,6 +322,7 @@ def run_sample():
 
 
 def distributed_train(args):
+    seed = int(args['--seed'])
     config_file = args['--config']
     use_cuda = args['--cuda']
 
@@ -249,16 +345,27 @@ def distributed_train(args):
 
     json.dump(config, open(os.path.join(work_dir, 'config.json'), 'w'), indent=2)
 
-    learner_gpu_id = evaluator_gpu_id = -1
+    actor_devices = []
     if use_cuda:
         print(f'use cuda', file=sys.stderr)
-        learner_gpu_id = 0
-        evaluator_gpu_id = 0 #1 if torch.cuda.device_count() >= 2 else 0
+        device_count = torch.cuda.device_count()
+        assert device_count >= 2
+        learner_device = 'cuda:0'  # torch.device('cuda', 0)
+        evaluator_device = 'cuda:1'  # torch.device('cuda', 1)
+        for i in range(1 if device_count == 2 else 2, device_count):
+            actor_devices.append(f'cuda:{i}')  # torch.device('cuda', i)
+    else:
+        learner_device = evaluator_device = torch.device('cpu')
+        actor_devices.append(torch.device('cpu'))
 
-    learner = Learner(config, learner_gpu_id)
+    learner = Learner(
+        {**config, **{'seed': seed}},
+        device=learner_device)
 
-    print(f'Evaluator uses GPU {evaluator_gpu_id}', file=sys.stderr)
-    evaluator = Evaluator(config, eval_file=config['dev_file'], gpu_id=evaluator_gpu_id)
+    print(f'Evaluator uses device {evaluator_device}', file=sys.stderr)
+    evaluator = Evaluator(
+        {**config, **{'seed': seed + 1}},
+        eval_file=config['dev_file'], device=evaluator_device)
     learner.register_evaluator(evaluator)
 
     actor_num = config['actor_num']
@@ -273,7 +380,12 @@ def distributed_train(args):
 
     shared_program_cache = SharedProgramCache()
     for actor_id in range(actor_num):
-        actor = Actor(actor_id, shard_ids=actor_shard_dict[actor_id], shared_program_cache=shared_program_cache, config=config)
+        actor = Actor(
+            actor_id,
+            shard_ids=actor_shard_dict[actor_id],
+            shared_program_cache=shared_program_cache,
+            device=actor_devices[actor_id % len(actor_devices)],
+            config={**config, **{'seed': seed + 2 + actor_id}},)
         learner.register_actor(actor)
 
         actors.append(actor)
@@ -288,6 +400,13 @@ def distributed_train(args):
 
     print('starting learner', file=sys.stderr)
     learner.start()
+
+    while True:
+        for actor in actors:
+            if not actor.is_alive():
+                exit(0)
+
+        time.sleep(1)
 
     # while True:
     #     print('size of program cache', len(shared_program_cache.program_cache), file=sys.stderr)
@@ -366,14 +485,9 @@ def to_decode_results_dict(decode_results, test_envs):
 
 
 def main():
-    args = docopt(__doc__)
+    multiprocessing.set_start_method('spawn')
 
-    # seed the random number generators
-    seed = int(args['--seed'])
-    torch.manual_seed(seed)
-    if args['--cuda']:
-        torch.cuda.manual_seed(seed)
-    np.random.seed(seed * 13 // 7)
+    args = docopt(__doc__)
 
     if args['train']:
         distributed_train(args)
@@ -431,6 +545,33 @@ def sanity_check():
     # agent.decode_examples(envs[:1], beam_size=5)
 
 
+def run_example():
+    envs = load_environments(["/Users/pengcheng/Research/datasets/wikitable/processed_input/train_examples.jsonl"],
+                             "/Users/pengcheng/Research/datasets/wikitable/processed_input/tables.jsonl",
+                             vocab_file="/Users/pengcheng/Research/datasets/wikitable/raw_input/wikitable_glove_vocab.json",
+                             en_vocab_file="/Users/pengcheng/Research/datasets/wikitable/processed_input/preprocess_14/en_vocab_min_count_5.json",
+                             embedding_file="/Users/pengcheng/Research/datasets/wikitable/raw_input/wikitable_glove_embedding_mat.npy")
+    #
+    env_dict = {env.name: env for env in envs}
+    env_dict['nt-3035'].interpreter.interactive(assisted=True)
+
+    examples = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/data_split_1/train_split.jsonl")
+    tables = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/tables.jsonl")
+    # # # #
+    examples_dict = {e['id']: e for e in examples}
+    tables_dict = {tab['name']: tab for tab in tables}
+    # # # #
+    q_id = 'nt-3302'
+    interpreter = init_interpreter_for_example(examples_dict[q_id], tables_dict[examples_dict[q_id]['context']]).clone()
+    interpreter.interactive(assisted=True)
+    program = ['(', 'argmax', 'all_rows', 'v4', ')', '(', 'hop', 'v8', 'v2', ')', '<END>']
+    for token in program:
+        print(interpreter.valid_tokens())
+        interpreter.read_token(token)
+    # from table.wtq.evaluator import check_prediction
+    # is_correct = utils.wtq_score([0.4], ['00.4', '0.4'])
+    # print(is_correct)
+
 if __name__ == '__main__':
     # envs = load_environments(["/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/train_examples.jsonl"],
     #                          "/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/tables.jsonl",
@@ -459,6 +600,7 @@ if __name__ == '__main__':
     # # print(is_correct)
 
     # run_sample()
+    # run_example()
     main()
     # sanity_check()
 
