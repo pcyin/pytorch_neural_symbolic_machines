@@ -28,6 +28,7 @@ import torch
 from pytorch_pretrained_bert import BertTokenizer
 
 from nsm.actor import Actor
+from nsm.agent_factory import PGAgent
 from nsm.embedding import EmbeddingModel
 from nsm.env_factory import QAProgrammingEnv
 from nsm.computer_factory import LispInterpreter
@@ -438,7 +439,8 @@ def test(args):
                                   table_file=config['table_file'],
                                   vocab_file=config['vocab_file'],
                                   en_vocab_file=config['en_vocab_file'],
-                                  embedding_file=config['embedding_file'])
+                                  embedding_file=config['embedding_file'],
+                                  bert_model=config['bert_model'])
     for env in test_envs:
         env.use_cache = False
         env.punish_extra_work = False

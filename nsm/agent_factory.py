@@ -3,6 +3,7 @@ import collections
 import heapq
 import itertools
 import math
+import os
 from collections import OrderedDict
 import json
 import sys
@@ -117,8 +118,15 @@ class BertEncoder(EncoderBase):
 
     @classmethod
     def build(cls, config):
+        tb_state_dict = None
+        tb_path = config.get('table_bert_model')
+        if tb_path:
+            print(f'Loading table BERT model {tb_path}', file=sys.stderr)
+            tb_state_dict = torch.load(tb_path, map_location='cpu')
+
         bert_model = TableBERT.from_pretrained(
             config['bert_model'],
+            state_dict=tb_state_dict,
             tokenizer=BertTokenizer.from_pretrained(config['bert_model'])
         )
 
