@@ -402,12 +402,13 @@ def distributed_train(args):
     print('starting learner', file=sys.stderr)
     learner.start()
 
-    while True:
-        for actor in actors:
-            if not actor.is_alive():
-                exit(0)
-
-        time.sleep(1)
+    # debug code
+    # while True:
+    #     for actor in actors:
+    #         if not actor.is_alive():
+    #             exit(0)
+    #
+    #     time.sleep(1)
 
     # while True:
     #     print('size of program cache', len(shared_program_cache.program_cache), file=sys.stderr)
