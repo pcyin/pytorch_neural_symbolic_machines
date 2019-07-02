@@ -192,6 +192,8 @@ class TableBERT(BertPreTrainedModel):
         question_token_mask = np.zeros((batch_size, max_question_len), dtype=np.bool)
         column_token_mask = np.zeros((batch_size, max_sequence_len), dtype=np.bool)
         column_token_to_column_id = np.zeros((batch_size, max_sequence_len), dtype=np.int)
+        # we initialize the mapping with the id of last column as the "garbage collection" entry
+        column_token_to_column_id.fill(max_column_num - 1)
         column_mask = np.zeros((batch_size, max_column_num), dtype=np.bool)
 
         for i, instance in enumerate(instances):
