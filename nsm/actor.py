@@ -295,92 +295,106 @@ class Actor(torch_mp.Process):
                 epoch_start = time.time()
                 batch_iter = nn_util.batch_iter(self.environments, batch_size=self.config['batch_size'], shuffle=True)
                 for batch_id, batched_envs in enumerate(batch_iter):
-                    # print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}', file=sys.stderr)
-                    # perform sampling
-                    t1 = time.time()
-                    if sample_method == 'sample':
-                        explore_samples = self.agent.sample(batched_envs,
-                                                            sample_num=config['n_explore_samples'],
-                                                            use_cache=config['use_cache'])
-                    else:
-                        explore_samples = self.agent.new_beam_search(batched_envs,
-                                                                     beam_size=config['n_explore_samples'],
-                                                                     use_cache=config['use_cache'],
-                                                                     return_list=True)
-                    t2 = time.time()
-                    print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, sampled {len(explore_samples)} trajectories (took {t2 - t1}s)', file=sys.stderr)
+                    try:
+                        # print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}', file=sys.stderr)
+                        # perform sampling
+                        t1 = time.time()
+                        if sample_method == 'sample':
+                            explore_samples = self.agent.sample(batched_envs,
+                                                                sample_num=config['n_explore_samples'],
+                                                                use_cache=config['use_cache'])
+                        else:
+                            explore_samples = self.agent.new_beam_search(batched_envs,
+                                                                         beam_size=config['n_explore_samples'],
+                                                                         use_cache=config['use_cache'],
+                                                                         return_list=True)
+                        t2 = time.time()
+                        print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, sampled {len(explore_samples)} trajectories (took {t2 - t1}s)', file=sys.stderr)
 
-                    # retain samples with high reward
-                    good_explore_samples = [sample for sample in explore_samples if sample.trajectory.reward == 1.]
-                    # for sample in good_explore_samples:
-                    #     print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, '
-                    #           f'add 1 traj [{sample.trajectory}] for env [{sample.trajectory.environment_name}] to buffer',
-                    #           file=sys.stderr)
-                    self.replay_buffer.save_samples(good_explore_samples)
+                        # retain samples with high reward
+                        good_explore_samples = [sample for sample in explore_samples if sample.trajectory.reward == 1.]
+                        # for sample in good_explore_samples:
+                        #     print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, '
+                        #           f'add 1 traj [{sample.trajectory}] for env [{sample.trajectory.environment_name}] to buffer',
+                        #           file=sys.stderr)
+                        self.replay_buffer.save_samples(good_explore_samples)
 
-                    # sample replay examples from the replay buffer
-                    t1 = time.time()
-                    replay_samples = self.replay_buffer.replay(batched_envs,
-                                                               n_samples=config['n_replay_samples'],
-                                                               use_top_k=config['use_top_k_replay_samples'],
-                                                               replace=config['replay_sample_with_replacement'],
-                                                               consistency_model=self.consistency_model)
-                    t2 = time.time()
-                    print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, got {len(replay_samples)} replay samples (took {t2 - t1}s)',
-                          file=sys.stderr)
+                        # sample replay examples from the replay buffer
+                        t1 = time.time()
+                        replay_samples = self.replay_buffer.replay(batched_envs,
+                                                                   n_samples=config['n_replay_samples'],
+                                                                   use_top_k=config['use_top_k_replay_samples'],
+                                                                   replace=config['replay_sample_with_replacement'],
+                                                                   consistency_model=self.consistency_model)
+                        t2 = time.time()
+                        print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, got {len(replay_samples)} replay samples (took {t2 - t1}s)',
+                              file=sys.stderr)
 
-                    samples_info = dict()
-                    if method == 'mapo':
-                        train_examples = []
-                        for sample in replay_samples:
-                            sample_weight = self.replay_buffer.env_program_prob_sum_dict.get(sample.trajectory.environment_name, 0.)
-                            sample_weight = max(sample_weight, self.config['min_replay_samples_weight'])
+                        samples_info = dict()
+                        if method == 'mapo':
+                            train_examples = []
+                            for sample in replay_samples:
+                                sample_weight = self.replay_buffer.env_program_prob_sum_dict.get(sample.trajectory.environment_name, 0.)
+                                sample_weight = max(sample_weight, self.config['min_replay_samples_weight'])
 
-                            sample.weight = sample_weight * 1. / config['n_replay_samples']
-                            train_examples.append(sample)
+                                sample.weight = sample_weight * 1. / config['n_replay_samples']
+                                train_examples.append(sample)
 
-                        on_policy_samples = self.agent.sample(batched_envs,
-                                                              sample_num=config['n_policy_samples'],
-                                                              use_cache=False)
-                        non_replay_samples = [sample for sample in on_policy_samples
-                                              if sample.trajectory.reward == 1. and not self.replay_buffer.contains(sample.trajectory)]
-                        self.replay_buffer.save_samples(non_replay_samples)
+                            on_policy_samples = self.agent.sample(batched_envs,
+                                                                  sample_num=config['n_policy_samples'],
+                                                                  use_cache=False)
+                            non_replay_samples = [sample for sample in on_policy_samples
+                                                  if sample.trajectory.reward == 1. and not self.replay_buffer.contains(sample.trajectory)]
+                            self.replay_buffer.save_samples(non_replay_samples)
 
-                        for sample in non_replay_samples:
-                            if self.use_consistency_model and self.consistency_model.debug:
-                                print(f'>>>>>>>>>> non replay samples for {sample.trajectory.environment_name}', file=self.consistency_model.log_file)
-                                self.consistency_model.compute_consistency_score(sample.trajectory.environment_name, [sample])
-                                print(f'<<<<<<<<<<< non replay samples for {sample.trajectory.environment_name}',
-                                      file=self.consistency_model.log_file)
+                            for sample in non_replay_samples:
+                                if self.use_consistency_model and self.consistency_model.debug:
+                                    print(f'>>>>>>>>>> non replay samples for {sample.trajectory.environment_name}', file=self.consistency_model.log_file)
+                                    self.consistency_model.compute_consistency_score(sample.trajectory.environment_name, [sample])
+                                    print(f'<<<<<<<<<<< non replay samples for {sample.trajectory.environment_name}',
+                                          file=self.consistency_model.log_file)
 
-                            replay_samples_prob = self.replay_buffer.env_program_prob_sum_dict.get(sample.trajectory.environment_name, 0.)
-                            if replay_samples_prob > 0.:
-                                # clip the sum of probabilities for replay samples if the replay buffer is not empty
-                                replay_samples_prob = max(replay_samples_prob, self.config['min_replay_samples_weight'])
+                                replay_samples_prob = self.replay_buffer.env_program_prob_sum_dict.get(sample.trajectory.environment_name, 0.)
+                                if replay_samples_prob > 0.:
+                                    # clip the sum of probabilities for replay samples if the replay buffer is not empty
+                                    replay_samples_prob = max(replay_samples_prob, self.config['min_replay_samples_weight'])
 
-                            sample_weight = 1. - replay_samples_prob
+                                sample_weight = 1. - replay_samples_prob
 
-                            sample.weight = sample_weight * 1. / config['n_policy_samples']
-                            train_examples.append(sample)
+                                sample.weight = sample_weight * 1. / config['n_policy_samples']
+                                train_examples.append(sample)
 
-                        n_clip = 0
-                        for env in batched_envs:
-                            name = env.name
-                            if (name in self.replay_buffer.env_program_prob_dict and
-                                    self.replay_buffer.env_program_prob_sum_dict.get(name, 0.) < self.config['min_replay_samples_weight']):
-                                n_clip += 1
-                        clip_frac = n_clip / len(batched_envs)
+                            n_clip = 0
+                            for env in batched_envs:
+                                name = env.name
+                                if (name in self.replay_buffer.env_program_prob_dict and
+                                        self.replay_buffer.env_program_prob_sum_dict.get(name, 0.) < self.config['min_replay_samples_weight']):
+                                    n_clip += 1
+                            clip_frac = n_clip / len(batched_envs)
 
-                        train_examples = train_examples
-                        samples_info['clip_frac'] = clip_frac
-                    elif method == 'mml':
-                        for sample in replay_samples:
-                            sample.weight = sample.prob / self.replay_buffer.env_program_prob_sum_dict[sample.trajectory.environment_name]
-                        train_examples = replay_samples
-                    else:
-                        train_examples = replay_samples
-                        for sample in train_examples:
-                            sample.weight = 1.
+                            train_examples = train_examples
+                            samples_info['clip_frac'] = clip_frac
+                        elif method == 'mml':
+                            for sample in replay_samples:
+                                sample.weight = sample.prob / self.replay_buffer.env_program_prob_sum_dict[sample.trajectory.environment_name]
+                            train_examples = replay_samples
+                        else:
+                            train_examples = replay_samples
+                            for sample in train_examples:
+                                sample.weight = 1.
+                    except RuntimeError as e:
+                        if 'out of memory' in str(e):
+                            msg = (
+                                    f'[Actor {self.actor_id}] WARNING: ran out of memory with exception: '
+                                    + '{};'.format(e)
+                                    + '\n Skipping batch'
+                            )
+                            print(msg, file=sys.stderr)
+                            sys.stderr.flush()
+
+                            continue
+                        else:
+                            raise e
 
                     if train_examples:
                         self.train_queue.put((train_examples, samples_info))
@@ -388,6 +402,12 @@ class Actor(torch_mp.Process):
                         continue
 
                     self.check_and_load_new_model()
+
+                    if self.device.type == 'cuda':
+                        mem_cached_mb = torch.cuda.memory_cached() / 1000000
+                        if mem_cached_mb > 8000:
+                            print(f'Actor {self.actor_id} empty cached memory [{mem_cached_mb} MB]', file=sys.stderr)
+                            torch.cuda.empty_cache()
 
                 epoch_end = time.time()
                 print(f"[Actor {self.actor_id}] epoch {epoch_id} finished, took {epoch_end - epoch_start}s", file=sys.stderr)
@@ -400,6 +420,7 @@ class Actor(torch_mp.Process):
                 #     json.dump(buffer_content, f, indent=2)
                 if self.consistency_model:
                     self.consistency_model.log_file.flush()
+                    sys.stderr.flush()
 
     def load_environments(self, file_paths):
         from table.experiments import load_environments, create_environments
