@@ -127,7 +127,8 @@ class BertEncoder(EncoderBase):
         bert_model = TableBERT.from_pretrained(
             config['bert_model'],
             state_dict=tb_state_dict,
-            tokenizer=BertTokenizer.from_pretrained(config['bert_model'])
+            tokenizer=BertTokenizer.from_pretrained(config['bert_model']),
+            column_representation=config.get('column_representation', 'mean_pool')
         )
 
         return cls(

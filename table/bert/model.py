@@ -29,29 +29,29 @@ def get_column_representation(flattened_column_encoding: torch.Tensor,
     """
     Args:
         flattened_column_encoding: (batch_size, total_column_token_num, encoding_size)
-        column_token_to_column_id: (batch_size, total_column_token_num)
+        column_token_to_column_id: (batch_size, total_column_token_num + 1)
         column_mask: (batch_size, max_column_num)
 
     Returns:
         column_encoding: (batch_size, max_column_num, encoding_size)
     """
 
-    if aggregator == 'max_pool':
+    if aggregator.startswith('max_pool'):
         agg_func = scatter_max
         flattened_column_encoding[column_token_mask == 0] = float('-inf')
-    elif aggregator == 'mean_pool':
+    elif aggregator.startswith('mean_pool'):
         agg_func = scatter_mean
 
     max_column_num = column_mask.size(-1)
     # column_token_to_column_id: (batch_size, max_column_num)
-    # (batch_size, max_column_size, encoding_size)
+    # (batch_size, max_column_size + 1, encoding_size)
     result = agg_func(flattened_column_encoding,
                       column_token_to_column_id.unsqueeze(-1).expand(-1, -1, flattened_column_encoding.size(-1)),
                       dim=1,
-                      dim_size=max_column_num)
+                      dim_size=max_column_num + 1)
 
     # mask out padding columns
-    result = result * column_mask.unsqueeze(-1)
+    result = result[:, :-1] * column_mask.unsqueeze(-1)
 
     if aggregator == 'max_pool':
         column_encoding = result[0]
@@ -86,15 +86,23 @@ def convert_example_to_bert_input(example: Example,
 
         tokens_b += col_tokens
 
+        col_end_index = col_start_idx + len(col_tokens)
+        col_name_end_index = col_start_idx + len(column.name_tokens)
+
+        early_terminate = False
         if len(tokens_b) >= max_table_token_length:
             tokens_b = tokens_b[:max_table_token_length]
             col_end_index = len(tokens_a) + max_table_token_length
-            col_spans[column.name] = (col_start_idx, col_end_index)
+            col_name_end_index = min(col_name_end_index, col_end_index)
+            early_terminate = True
 
-            break
+        col_spans[column.name] = {
+            'whole_span': (col_start_idx, col_end_index),
+            'column_name': (col_start_idx, col_name_end_index),
+        }
 
-        col_end_index = col_start_idx + len(col_tokens)
-        col_spans[column.name] = (col_start_idx, col_end_index)
+        if early_terminate: break
+
         col_start_idx += len(col_tokens)
 
     if tokens_b[-1] == column_delimiter:
@@ -191,10 +199,16 @@ class TableBERT(BertPreTrainedModel):
 
         question_token_mask = np.zeros((batch_size, max_question_len), dtype=np.bool)
         column_token_mask = np.zeros((batch_size, max_sequence_len), dtype=np.bool)
+
+        # we initialize the mapping with the id of last column as the "garbage collection" entry for reduce ops
         column_token_to_column_id = np.zeros((batch_size, max_sequence_len), dtype=np.int)
-        # we initialize the mapping with the id of last column as the "garbage collection" entry
-        column_token_to_column_id.fill(max_column_num - 1)
+        column_token_to_column_id.fill(max_column_num)
+
         column_mask = np.zeros((batch_size, max_column_num), dtype=np.bool)
+
+        column_span = 'whole_span'
+        if 'column_name' in self.column_repr_method:
+            column_span = 'column_name'
 
         for i, instance in enumerate(instances):
             token_ids = self.tokenizer.convert_tokens_to_ids(instance['tokens'])
@@ -208,7 +222,7 @@ class TableBERT(BertPreTrainedModel):
             header = examples[i].table.header
             for col_id, column in enumerate(header):
                 if column.name in instance['column_spans']:
-                    col_start, col_end = instance['column_spans'][column.name]
+                    col_start, col_end = instance['column_spans'][column.name][column_span]
 
                     column_token_to_column_id[i, col_start: col_end] = col_id
                     column_token_mask[i, col_start: col_end] = 1.
