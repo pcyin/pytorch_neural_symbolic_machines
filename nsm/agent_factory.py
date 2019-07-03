@@ -190,9 +190,13 @@ class BertEncoder(EncoderBase):
 
         question_encoding, table_column_encoding, info = self._bert_encode(env_context)
 
-        question_encoding = self.bert_output_project(
-            torch.cat([question_encoding,
-                       batched_context['question_features']], dim=-1))
+        if self.question_feat_size > 0:
+            question_encoding = torch.cat([
+                question_encoding,
+                batched_context['question_features']],
+                dim=-1)
+
+        question_encoding = self.bert_output_project(question_encoding)
 
         question_encoding_att_linear = self.question_encoding_att_value_to_key(question_encoding)
 
@@ -266,7 +270,9 @@ class BertDecoder(DecoderBase):
         # (builtin_func_num, embed_size)
         self.builtin_func_embeddings = nn.Embedding(builtin_func_num, mem_item_embed_size)
 
-        self.output_feature_linear = nn.Linear(output_feature_num, 1, bias=False)
+        self.output_feature_num = output_feature_num
+        if output_feature_num > 0:
+            self.output_feature_linear = nn.Linear(output_feature_num, 1, bias=False)
 
         self.dropout = nn.Dropout(dropout)
 
@@ -280,7 +286,9 @@ class BertDecoder(DecoderBase):
                 module.bias.data.zero_()
 
         self.apply(_init_weights)
-        self.output_feature_linear.weight.data.zero_()
+
+        if self.output_feature_num > 0:
+            self.output_feature_linear.weight.data.zero_()
 
         # set forget gate bias to 1, as in tensorflow
         for name, p in itertools.chain(self.rnn_cell.named_parameters()):
@@ -404,11 +412,9 @@ class BertDecoder(DecoderBase):
 
         # add output features to logits
         # (batch_size, mem_size)
-        # print('x.output_features', x.output_features.device, x.output_features.size())
-        # print('self.output_feature_linear', self.output_feature_linear.weight.device)
-        output_feature = self.output_feature_linear(x.output_features).squeeze(-1)
-
-        mem_logits = mem_logits + output_feature
+        if self.output_feature_num:
+            output_feature = self.output_feature_linear(x.output_features).squeeze(-1)
+            mem_logits = mem_logits + output_feature
 
         # write head of shape (batch_size)
         # mask of shape (batch_size)
