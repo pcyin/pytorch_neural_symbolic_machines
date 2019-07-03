@@ -39,8 +39,10 @@ def get_column_representation(flattened_column_encoding: torch.Tensor,
     if aggregator.startswith('max_pool'):
         agg_func = scatter_max
         flattened_column_encoding[column_token_mask == 0] = float('-inf')
-    elif aggregator.startswith('mean_pool'):
+    elif aggregator.startswith('mean_pool') or aggregator.startswith('first_token'):
         agg_func = scatter_mean
+    else:
+        raise ValueError(f'Unknown column representation method {aggregator}')
 
     max_column_num = column_mask.size(-1)
     # column_token_to_column_id: (batch_size, max_column_num)
@@ -50,7 +52,7 @@ def get_column_representation(flattened_column_encoding: torch.Tensor,
                       dim=1,
                       dim_size=max_column_num + 1)
 
-    # mask out padding columns
+    # remove the last "garbage collection" entry, mask out padding columns
     result = result[:, :-1] * column_mask.unsqueeze(-1)
 
     if aggregator == 'max_pool':
@@ -99,9 +101,11 @@ def convert_example_to_bert_input(example: Example,
         col_spans[column.name] = {
             'whole_span': (col_start_idx, col_end_index),
             'column_name': (col_start_idx, col_name_end_index),
+            'first_token': (col_start_idx, col_start_idx + 1)
         }
 
         if early_terminate: break
+        # assert (tokens_a + tokens_b)[col_start_idx] == column.name_tokens[0]
 
         col_start_idx += len(col_tokens)
 
@@ -209,6 +213,8 @@ class TableBERT(BertPreTrainedModel):
         column_span = 'whole_span'
         if 'column_name' in self.column_repr_method:
             column_span = 'column_name'
+        elif 'first_token' in self.column_repr_method:
+            column_span = 'first_token'
 
         for i, instance in enumerate(instances):
             token_ids = self.tokenizer.convert_tokens_to_ids(instance['tokens'])
