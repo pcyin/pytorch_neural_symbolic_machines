@@ -62,6 +62,12 @@ class Learner(torch_mp.Process):
         save_every_niter = config['save_every_niter']
         entropy_reg_weight = config['entropy_reg_weight']
         summary_writer = SummaryWriter(os.path.join(config['work_dir'], 'tb_log/train'))
+        max_train_step = config['max_train_step']
+
+        freeze_bert = config.get('freeze_bert', False)
+        if freeze_bert:
+            for p in model.encoder.bert_model.parameters():
+                p.requires_grad = False
 
         no_grad = ['pooler']
         param_optimizer = list([(p_name, p)
@@ -73,7 +79,7 @@ class Learner(torch_mp.Process):
              'weight_decay': 0.01},
             {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
-        num_train_optimization_steps = 15000
+        num_train_optimization_steps = max_train_step
 
         bert_optimizer = BertAdam(
             bert_grouped_parameters,
@@ -122,7 +128,6 @@ class Learner(torch_mp.Process):
         # torch.nn.init.normal_(model.encoder.context_embedder.trainable_embedding.weight, mean=0., std=0.1)
         # torch.nn.init.normal_(model.decoder.builtin_func_embeddings.weight, mean=0., std=0.1)
 
-        max_train_step = config['max_train_step']
         while train_iter < max_train_step:
             train_iter += 1
             optimizer.zero_grad()
