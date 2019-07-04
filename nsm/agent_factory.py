@@ -1490,7 +1490,12 @@ class PGAgent(nn.Module):
         kwargs = params['kwargs'] if params['kwargs'] is not None else dict()
 
         model = PGAgent.build(config, params=params['state_dict'], **kwargs)
-        model.load_state_dict(params['state_dict'])
+        incompatible_keys = model.load_state_dict(params['state_dict'], strict=False)
+        if incompatible_keys.missing_keys:
+            print('Loading agent, got missing keys {}'.format(incompatible_keys.missing_keys), file=sys.stderr)
+        if incompatible_keys.unexpected_keys:
+            print('Loading agent, got unexpected keys {}'.format(incompatible_keys.unexpected_keys), file=sys.stderr)
+
         model = model.to(device)
         model.eval()
 
