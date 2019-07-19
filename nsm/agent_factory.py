@@ -7,6 +7,8 @@ import os
 from collections import OrderedDict
 import json
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Dict, Tuple, Union, Any
 import numpy as np
 from pytorch_pretrained_bert import BertTokenizer
@@ -118,16 +120,22 @@ class BertEncoder(EncoderBase):
 
     @classmethod
     def build(cls, config):
-        tb_state_dict = None
         tb_path = config.get('table_bert_model')
+        tb_state_dict = None
+
         if tb_path:
             print(f'Loading table BERT model {tb_path}', file=sys.stderr)
             tb_state_dict = torch.load(tb_path, map_location='cpu')
+            tb_path = Path(tb_path)
+            tb_config = json.load((tb_path.parent / 'tb_config.json').open())
+        else:
+            tb_config = json.load(open(config['table_bert_config_file']))
 
         bert_model = TableBERT.from_pretrained(
             config['bert_model'],
             state_dict=tb_state_dict,
             tokenizer=BertTokenizer.from_pretrained(config['bert_model']),
+            table_bert_config=tb_config,
             column_representation=config.get('column_representation', 'mean_pool')
         )
 

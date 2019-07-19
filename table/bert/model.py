@@ -1,7 +1,9 @@
 import sys
+from argparse import Namespace
 from collections import OrderedDict
 from pathlib import Path
 import json
+from types import SimpleNamespace
 from typing import List, Dict
 import numpy as np
 
@@ -10,7 +12,7 @@ from pytorch_pretrained_bert import BertTokenizer
 from torch_scatter import scatter_max, scatter_mean
 import torch.nn as nn
 
-from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel, BertConfig
+from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel, BertConfig, BertForMaskedLM
 from torch.nn import CrossEntropyLoss, BCEWithLogitsLoss
 
 from table.bert.data_model import Example
@@ -63,10 +65,9 @@ def get_column_representation(flattened_column_encoding: torch.Tensor,
     return column_encoding
 
 
-def convert_example_to_bert_input(example: Example,
-                                  use_type_text=True,
-                                  use_sample_value=True,
-                                  column_delimiter='[SEP]') -> Dict:
+def convert_example_to_bert_input(
+        example: Example,
+        config: SimpleNamespace) -> Dict:
     tokens_a = ['[CLS]'] + example.question + ['[SEP]']
 
     col_spans = OrderedDict()
@@ -75,14 +76,23 @@ def convert_example_to_bert_input(example: Example,
     tokens_b = []
     max_table_token_length = MAX_BERT_INPUT_LENGTH - len(tokens_a) - 1  # account for ending [SEP]
 
+    column_item_delimiter = config.column_item_delimiter
+    column_delimiter = config.column_delimiter
     for col_id, column in enumerate(example.table.header):
         col_tokens = list(column.name_tokens)
 
-        if use_type_text:
-            col_tokens += ['('] + [column.type] + [')']
+        if config.use_type_text:
+            if column_item_delimiter == '(':
+                col_tokens += ['('] + [column.type] + [')']
+            elif column_item_delimiter == '|':
+                col_tokens += ['|', column.type]
 
-        if use_sample_value:
-            col_tokens += ['('] + column.sample_value_tokens[:5] + [')']
+        if config.use_sample_value:
+            sample_value_tokens = column.sample_value_tokens[:5]
+            if column_item_delimiter == '(':
+                col_tokens += ['('] + sample_value_tokens + [')']
+            elif column_item_delimiter == '|':
+                col_tokens += ['|'] + sample_value_tokens
 
         col_tokens += [column_delimiter]
 
@@ -125,33 +135,51 @@ def convert_example_to_bert_input(example: Example,
     return instance
 
 
-class TableBERT(BertPreTrainedModel):
+class TableBERT(BertForMaskedLM):
     def __init__(self,
                  bert_config: BertConfig,
                  tokenizer: BertTokenizer,
                  column_representation='mean_pool',
+                 table_bert_config: dict = None,
                  **kwargs):
-        BertPreTrainedModel.__init__(self, bert_config)
-
-        self.bert = BertModel(bert_config)
-        self.apply(self.init_bert_weights)
+        BertForMaskedLM.__init__(self, bert_config)
 
         self.column_repr_method = column_representation
         self.tokenizer = tokenizer
+
+        table_config = self.init_config()
+        table_bert_config = table_bert_config or dict()
+        for key, val in table_bert_config.items():
+            setattr(table_config, key, val)
+
+        self.table_config = table_config
+        print('Table BERT config', file=sys.stderr)
+        print(self.table_config, file=sys.stderr)
+
+    @classmethod
+    def init_config(cls):
+        return SimpleNamespace(
+            column_delimiter='[SEP]',
+            column_item_delimiter='(',
+            use_type_text=True,
+            use_sample_value=True
+        )
 
     @property
     def output_size(self):
         return self.bert.config.hidden_size
 
-    def forward(self,
-                input_ids: torch.Tensor,
-                segment_ids: torch.Tensor,
-                attention_mask: torch.Tensor,
-                question_token_mask: torch.Tensor,
-                column_token_mask: torch.Tensor,
-                column_token_to_column_id: torch.Tensor,
-                column_mask: torch.Tensor,
-                **kwargs):
+    def encode_context_and_table(
+        self,
+        input_ids: torch.Tensor,
+        segment_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        question_token_mask: torch.Tensor,
+        column_token_mask: torch.Tensor,
+        column_token_to_column_id: torch.Tensor,
+        column_mask: torch.Tensor,
+        **kwargs
+    ):
 
         # print('input_ids', input_ids.size(), file=sys.stderr)
         # print('segment_ids', segment_ids.size(), file=sys.stderr)
@@ -189,7 +217,7 @@ class TableBERT(BertPreTrainedModel):
     def to_tensor_dict(self, examples: List[Example]):
         instances = []
         for e_id, example in enumerate(examples):
-            instance = convert_example_to_bert_input(example)
+            instance = convert_example_to_bert_input(example, self.table_config)
             instances.append(instance)
 
         batch_size = len(examples)
@@ -256,8 +284,9 @@ class TableBERT(BertPreTrainedModel):
         for key in tensor_dict.keys():
             tensor_dict[key] = tensor_dict[key].to(device)
 
-        context_encoding, column_encoding = \
-            self.forward(**tensor_dict)
+        context_encoding, column_encoding = self.encode_context_and_table(
+            **tensor_dict)
+
         info = {
             'tensor_dict': tensor_dict,
             'instances': instances
