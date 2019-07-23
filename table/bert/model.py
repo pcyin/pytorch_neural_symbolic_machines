@@ -68,13 +68,19 @@ def get_column_representation(flattened_column_encoding: torch.Tensor,
 def convert_example_to_bert_input(
         example: Example,
         config: SimpleNamespace) -> Dict:
-    tokens_a = ['[CLS]'] + example.question + ['[SEP]']
+    context_tokens = example.question
 
+    if config.context_first:
+        table_tokens_start_idx = len(context_tokens) + 2  # account for [CLS] and [SEP]
+        max_table_token_length = MAX_BERT_INPUT_LENGTH - len(context_tokens) - 2 - 1  # account for [CLS] and [SEP], and the ending [SEP]
+    else:
+        table_tokens_start_idx = 1  # account for starting [CLS]
+        max_table_token_length = MAX_BERT_INPUT_LENGTH - len(context_tokens) - 2 - 1  # account for [CLS] and [SEP], and the ending [SEP]
+
+    # generate table tokens
+    table_tokens = []
     col_spans = OrderedDict()
-    col_start_idx = len(tokens_a)
-
-    tokens_b = []
-    max_table_token_length = MAX_BERT_INPUT_LENGTH - len(tokens_a) - 1  # account for ending [SEP]
+    col_start_idx = table_tokens_start_idx
 
     column_item_delimiter = config.column_item_delimiter
     column_delimiter = config.column_delimiter
@@ -96,15 +102,15 @@ def convert_example_to_bert_input(
 
         col_tokens += [column_delimiter]
 
-        tokens_b += col_tokens
+        table_tokens += col_tokens
 
         col_end_index = col_start_idx + len(col_tokens)
         col_name_end_index = col_start_idx + len(column.name_tokens)
 
         early_terminate = False
-        if len(tokens_b) >= max_table_token_length:
-            tokens_b = tokens_b[:max_table_token_length]
-            col_end_index = len(tokens_a) + max_table_token_length
+        if len(table_tokens) >= max_table_token_length:
+            table_tokens = table_tokens[:max_table_token_length]
+            col_end_index = table_tokens_start_idx + max_table_token_length
             col_name_end_index = min(col_name_end_index, col_end_index)
             early_terminate = True
 
@@ -119,18 +125,27 @@ def convert_example_to_bert_input(
 
         col_start_idx += len(col_tokens)
 
-    if tokens_b[-1] == column_delimiter:
-        del tokens_b[-1]
+    if table_tokens[-1] == column_delimiter:
+        del table_tokens[-1]  # remove last delimiter
 
-    sequence = tokens_a + tokens_b + ['[SEP]']
-    segment_ids = [0] * len(tokens_a) + [1] * len(tokens_b) + [1]
+    if config.context_first:
+        sequence = ['[CLS]'] + context_tokens + ['[SEP]'] + table_tokens + ['[SEP]']
+        segment_ids = [0] * (len(context_tokens) + 2) + [1] * (len(table_tokens) + 1)
+        question_token_ids = list(range(0, 1 + len(context_tokens)))
+    else:
+        sequence = ['[CLS]'] + table_tokens + ['[SEP]'] + context_tokens + ['[SEP]']
+        segment_ids = [0] * (len(table_tokens) + 2) + [1] * (len(context_tokens) + 1)
+        question_token_ids = list(range(len(table_tokens) + 2, len(table_tokens) + 2 + 1 + len(context_tokens)))
 
     instance = {
         'tokens': sequence,
         'segment_ids': segment_ids,
         'column_spans': col_spans,
-        'question_length': len(tokens_a) - 1  # remove the ending [SEP]
+        'question_length': 1 + len(context_tokens),  # [CLS]/[SEP] + input question
+        'question_token_ids': question_token_ids
     }
+
+    assert len(question_token_ids) == instance['question_length']
 
     return instance
 
@@ -162,7 +177,8 @@ class TableBERT(BertForMaskedLM):
             column_delimiter='[SEP]',
             column_item_delimiter='(',
             use_type_text=True,
-            use_sample_value=True
+            use_sample_value=True,
+            context_first=True
         )
 
     @property
@@ -174,6 +190,7 @@ class TableBERT(BertForMaskedLM):
         input_ids: torch.Tensor,
         segment_ids: torch.Tensor,
         attention_mask: torch.Tensor,
+        question_token_ids: torch.Tensor,
         question_token_mask: torch.Tensor,
         column_token_mask: torch.Tensor,
         column_token_to_column_id: torch.Tensor,
@@ -210,7 +227,14 @@ class TableBERT(BertForMaskedLM):
                                                     aggregator=self.column_repr_method)
 
         max_question_len = question_token_mask.sum(dim=-1).max().int()
-        context_encoding = sequence_output[:, :max_question_len, :] * question_token_mask.unsqueeze(-1)
+
+        # (batch_size, context_len, encoding_size)
+        context_encoding = torch.gather(
+            sequence_output,
+            dim=1,
+            index=question_token_ids.unsqueeze(-1).expand(-1, -1, sequence_output.size(-1)),
+        )
+        context_encoding = context_encoding * question_token_mask.unsqueeze(-1)
 
         return context_encoding, column_encoding
 
@@ -229,6 +253,7 @@ class TableBERT(BertForMaskedLM):
         mask_array = np.zeros((batch_size, max_sequence_len), dtype=np.bool)
         segment_array = np.zeros((batch_size, max_sequence_len), dtype=np.bool)
 
+        question_token_ids = np.zeros((batch_size, max_question_len), dtype=np.int)
         question_token_mask = np.zeros((batch_size, max_question_len), dtype=np.bool)
         column_token_mask = np.zeros((batch_size, max_sequence_len), dtype=np.bool)
 
@@ -251,6 +276,8 @@ class TableBERT(BertForMaskedLM):
             input_array[i, :len(token_ids)] = token_ids
             segment_array[i, :len(segment_ids)] = segment_ids
             mask_array[i, :len(token_ids)] = 1.
+
+            question_token_ids[i, :instance['question_length']] = instance['question_token_ids']
             question_token_mask[i, :instance['question_length']] = 1.
 
             header = examples[i].table.header
@@ -266,6 +293,7 @@ class TableBERT(BertForMaskedLM):
             'input_ids': torch.tensor(input_array.astype(np.int64)),
             'segment_ids': torch.tensor(segment_array.astype(np.int64)),
             'attention_mask': torch.tensor(mask_array, dtype=torch.float32),
+            'question_token_ids': torch.tensor(question_token_ids.astype(np.int64)),
             'question_token_mask': torch.tensor(question_token_mask, dtype=torch.float32),
             'column_token_to_column_id': torch.tensor(column_token_to_column_id.astype(np.int64)),
             'column_token_mask': torch.tensor(column_token_mask, dtype=torch.float32),
