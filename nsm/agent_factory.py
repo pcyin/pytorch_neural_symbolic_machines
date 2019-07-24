@@ -128,11 +128,15 @@ class BertEncoder(EncoderBase):
             tb_state_dict = torch.load(tb_path, map_location='cpu')
             tb_path = Path(tb_path)
             tb_config = json.load((tb_path.parent / 'tb_config.json').open())
+
+            # the bert model config is from the training config file
+            bert_model = tb_config['bert_model'] = json.load((tb_path.parent / 'config.json').open())['bert_model']
         else:
             tb_config = json.load(open(config['table_bert_config_file']))
+            bert_model = config['bert_model']
 
         bert_model = TableBERT.from_pretrained(
-            config['bert_model'],
+            bert_model,
             state_dict=tb_state_dict,
             tokenizer=BertTokenizer.from_pretrained(config['bert_model']),
             table_bert_config=tb_config,
