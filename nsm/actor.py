@@ -429,7 +429,8 @@ class Actor(torch_mp.Process):
                                  vocab_file=self.config['vocab_file'],
                                  en_vocab_file=self.config['en_vocab_file'],
                                  embedding_file=self.config['embedding_file'],
-                                 bert_model=self.config['bert_model'])
+                                 bert_model=self.config['bert_model'],
+                                 config=self.config)
 
         setattr(self, 'environments', envs)
 

@@ -44,9 +44,10 @@ import multiprocessing
 from docopt import docopt
 
 from nsm.program_cache import SharedProgramCache
+from table.bert.data_model import Column
 
 
-def annotate_example_for_bert(example: Dict, table: Dict, bert_tokenizer: BertTokenizer):
+def annotate_example_for_bert(example: Dict, table: Dict, bert_tokenizer: BertTokenizer, args: Dict):
     from table.bert.data_model import Table
     from table.bert.data_model import Column
 
@@ -90,6 +91,76 @@ def annotate_example_for_bert(example: Dict, table: Dict, bert_tokenizer: BertTo
         entity['token_start'] = new_token_start
         entity['token_end'] = new_token_end
 
+    table_repr_method = args.get('table_representation', 'concate')
+    if table_repr_method == 'concate':
+        columns = get_columns_concate(example, table, bert_tokenizer)
+    elif table_repr_method == 'canonical':
+        columns = get_columns_canonical(example, table, bert_tokenizer)
+    else:
+        raise RuntimeError('Unknown table representation')
+
+    table = Table(id=example['context'], header=columns)
+    example['table'] = table
+
+    return example
+
+
+def get_columns_canonical(example, table, bert_tokenizer):
+    # parse the table
+    canonical_columns = OrderedDict()
+    canonical_column_ids = OrderedDict()
+    columns = []
+    raw_column_canonical_ids = []
+    for col_id, raw_column_name in enumerate(table['props']):
+        column_name = raw_column_name[len('r.'):]
+        type_pos = column_name.rfind('-')
+        column_name = untyped_column_name = column_name[:type_pos]
+        column_name = column_name.replace('-', ' ').replace('_', ' ')
+
+        raw_type_string = raw_column_name[raw_column_name.rfind('-') + 1:]
+
+        if raw_type_string == 'string':
+            type_string = 'text'
+        elif raw_type_string.startswith('num') or raw_type_string.startswith('date'):
+            type_string = 'real'
+        else:
+            type_string = 'text'
+
+        sample_value, sample_value_tokens = get_sample_value(raw_column_name, table, bert_tokenizer)
+
+        if untyped_column_name in canonical_columns:
+            column_entry = canonical_columns[untyped_column_name]
+            if column_entry.type == 'text' and type_string == 'real':
+                column_entry.type = 'real'
+                column_entry.sample_value_tokens = sample_value_tokens
+
+            raw_column_canonical_ids.append(canonical_column_ids[untyped_column_name])
+        else:
+            column = Column(name=untyped_column_name,
+                            type=type_string,
+                            sample_value=sample_value,
+                            name_tokens=bert_tokenizer.tokenize(column_name),
+                            sample_value_tokens=sample_value_tokens)
+
+            canonical_columns[untyped_column_name] = column
+            canonical_column_ids[untyped_column_name] = col_id
+            raw_column_canonical_ids.append(col_id)
+
+        columns.append(
+            Column(name=raw_column_name,
+                   type=raw_type_string)
+        )
+
+    column_info = {
+        'columns': list(canonical_columns.values()),
+        'raw_columns': columns,
+        'raw_column_canonical_ids': raw_column_canonical_ids
+    }
+
+    return column_info
+
+
+def get_columns_concate(example, table, bert_tokenizer):
     # parse the table
     columns = []
     for raw_column_name in table['props']:
@@ -107,15 +178,7 @@ def annotate_example_for_bert(example: Dict, table: Dict, bert_tokenizer: BertTo
         else:
             type_string = 'text'
 
-        sample_value = None
-        for row_id, row in table['kg'].items():
-            if raw_column_name in row and isinstance(row[raw_column_name], list) and row[raw_column_name][0] is not None:
-                sample_value = row[raw_column_name][0]
-                break
-        if sample_value is not None:
-            sample_value_tokens = bert_tokenizer.tokenize(str(sample_value))
-        else:
-            sample_value_tokens = []
+        sample_value, sample_value_tokens = get_sample_value(raw_column_name, table, bert_tokenizer)
 
         column = Column(name=raw_column_name,
                         type=type_string,
@@ -125,14 +188,28 @@ def annotate_example_for_bert(example: Dict, table: Dict, bert_tokenizer: BertTo
 
         columns.append(column)
 
-    table = Table(id=example['context'], header=columns)
-    example['table'] = table
+    column_info = {
+        'columns': columns
+    }
 
-    return example
+    return column_info
+
+
+def get_sample_value(raw_column_name, table, bert_tokenizer):
+    sample_value = None
+    for row_id, row in table['kg'].items():
+        if raw_column_name in row and isinstance(row[raw_column_name], list) and row[raw_column_name][0] is not None:
+            sample_value = row[raw_column_name][0]
+            break
+    if sample_value is not None:
+        sample_value_tokens = bert_tokenizer.tokenize(str(sample_value))
+    else:
+        sample_value_tokens = []
+    return sample_value, sample_value_tokens
 
 
 def load_environments(example_files: List[str], table_file: str, vocab_file: str, en_vocab_file: str,
-                      embedding_file: str, column_annotation_file: str = None, bert_model: str = None):
+                      embedding_file: str, config: Dict, column_annotation_file: str = None, bert_model: str = None):
     dataset = []
     for fn in example_files:
         dataset += load_jsonl(fn)
@@ -161,7 +238,7 @@ def load_environments(example_files: List[str], table_file: str, vocab_file: str
 
     environments = create_environments(
         table_dict, dataset, en_vocab, embedding_model,
-        executor_type='wtq', bert_tokenizer=bert_tokenizer)
+        executor_type='wtq', bert_tokenizer=bert_tokenizer, config=config)
     print('{} environments in total'.format(len(environments)))
 
     return environments
@@ -170,6 +247,7 @@ def load_environments(example_files: List[str], table_file: str, vocab_file: str
 def create_environments(table_dict, dataset, en_vocab, embedding_model, executor_type,
                         max_n_mem=60, max_n_exp=3,
                         pretrained_embedding_size=300,
+                        config=None,
                         bert_tokenizer=None):
     all_envs = []
 
@@ -215,7 +293,7 @@ def create_environments(table_dict, dataset, en_vocab, embedding_model, executor
                                                                                  embedding_size=pretrained_embedding_size)
 
         if bert_tokenizer:
-            example = annotate_example_for_bert(example, kg_info, bert_tokenizer)
+            example = annotate_example_for_bert(example, kg_info, bert_tokenizer, args=config)
 
         env = QAProgrammingEnv(en_vocab, de_vocab,
                                question_annotation=example,
@@ -330,6 +408,9 @@ def distributed_train(args):
     print(f'load config file [{config_file}]', file=sys.stderr)
     config = json.load(open(config_file))
 
+    config.setdefault('table_representation', 'concate')
+    config.setdefault('use_column_type_embedding', False)
+
     if args['--extra-config'] != '{}':
         extra_config = args['--extra-config']
         print(f'load extra config [{extra_config}]', file=sys.stderr)
@@ -441,7 +522,8 @@ def test(args):
                                   vocab_file=config['vocab_file'],
                                   en_vocab_file=config['en_vocab_file'],
                                   embedding_file=config['embedding_file'],
-                                  bert_model=config['bert_model'])
+                                  bert_model=config['bert_model'],
+                                  config=config)
     for env in test_envs:
         env.use_cache = False
         env.punish_extra_work = False

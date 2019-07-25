@@ -33,6 +33,9 @@ ContextEncoding = Dict[str, torch.Tensor]
 Hypothesis = collections.namedtuple('Hypothesis', ['env', 'score'])
 
 
+COLUMN_TYPES = ['string', 'date', 'number', 'num1', 'num2']
+
+
 class DecoderState(object):
     def __init__(self, state, memory):
         self.state = state
@@ -78,12 +81,15 @@ class DecoderBase(nn.Module):
 
 
 class BertEncoder(EncoderBase):
-    def __init__(self,
-                 table_bert_model,
-                 output_size: int,
-                 question_feat_size: int,
-                 max_variable_num_on_memory: int,
-                 dropout: float = 0.):
+    def __init__(
+        self,
+        table_bert_model,
+        output_size: int,
+        config: Dict,
+        question_feat_size: int,
+        max_variable_num_on_memory: int,
+        dropout: float = 0.
+    ):
         EncoderBase.__init__(self, output_size, max_variable_num_on_memory)
 
         self.bert_model = table_bert_model
@@ -91,19 +97,32 @@ class BertEncoder(EncoderBase):
         self.max_variable_num_on_memory = max_variable_num_on_memory
         self.dropout = nn.Dropout(dropout)
 
+        self.config = config
+
         self.bert_output_project = nn.Linear(
             self.bert_model.output_size + self.question_feat_size,
             self.output_size, bias=False
-        )
-
-        self.bert_table_output_project = nn.Linear(
-            self.bert_model.output_size, self.output_size, bias=False
         )
 
         self.question_encoding_att_value_to_key = nn.Linear(
             self.output_size,
             self.output_size, bias=False
         )
+
+        if self.config['table_representation'] == 'canonical':
+            self.column_type_to_id = {t: i for i, t in enumerate(COLUMN_TYPES)}
+            self.column_type_embedding = nn.Embedding(len(self.column_type_to_id), self.config['value_embedding_size'])
+
+        if self.config['use_column_type_embedding']:
+            self.bert_table_output_project = nn.Linear(
+                self.bert_model.output_size + self.column_type_embedding.embedding_dim,
+                self.output_size,
+                bias=False
+            )
+        else:
+            self.bert_table_output_project = nn.Linear(
+                self.bert_model.output_size, self.output_size, bias=False
+            )
 
         self.init_weights()
 
@@ -148,7 +167,8 @@ class BertEncoder(EncoderBase):
             output_size=config['hidden_size'],
             question_feat_size=config['n_en_input_features'],
             max_variable_num_on_memory=config['memory_size'] - config['builtin_func_num'],
-            dropout=config['dropout']
+            dropout=config['dropout'],
+            config=config
         )
 
     def example_list_to_batch(self, env_context: List[Dict]) -> Dict:
@@ -212,13 +232,49 @@ class BertEncoder(EncoderBase):
 
         question_encoding_att_linear = self.question_encoding_att_value_to_key(question_encoding)
 
+        batch_size = len(env_context)
+        max_column_num = table_column_encoding.size(1)
+        constant_value_num = batched_context['constant_spans'].size(1)
+
+        if self.config['table_representation'] == 'canonical':
+            new_tensor = table_column_encoding.new_tensor
+            canonical_column_encoding = table_column_encoding
+
+            raw_column_canonical_ids = np.zeros((batch_size, constant_value_num), dtype=np.int64)
+            column_type_ids = np.zeros((batch_size, constant_value_num), dtype=np.int64)
+            raw_column_mask = np.zeros((batch_size, constant_value_num), dtype=np.float32)
+
+            for e_id, context in enumerate(env_context):
+                column_info = context['table'].header
+                raw_columns = column_info['raw_columns']
+                valid_column_num = min(constant_value_num, len(raw_columns))
+                raw_column_canonical_ids[e_id, :valid_column_num] = column_info['raw_column_canonical_ids'][:valid_column_num]
+                column_type_ids[e_id, :valid_column_num] = [
+                    self.column_type_to_id[col.type] for col in raw_columns][:valid_column_num]
+
+                raw_column_mask[e_id, :valid_column_num] = 1.
+
+            raw_column_canonical_ids = new_tensor(raw_column_canonical_ids, dtype=torch.long)
+            table_column_encoding = torch.gather(
+                canonical_column_encoding,
+                dim=1,
+                index=raw_column_canonical_ids.unsqueeze(-1).expand(-1, -1, table_column_encoding.size(-1))
+            )
+
+            if self.config['use_column_type_embedding']:
+                type_fused_column_encoding = torch.cat([
+                    table_column_encoding, self.column_type_embedding(new_tensor(column_type_ids, dtype=torch.long))
+                ], dim=-1)
+
+                table_column_encoding = type_fused_column_encoding
+
+            table_column_encoding = table_column_encoding * new_tensor(raw_column_mask).unsqueeze(-1)
+
+            max_column_num = table_column_encoding.size(1)
+
         # (batch_size, max_column_num, encoding_size)
         table_column_encoding = self.bert_table_output_project(table_column_encoding)
 
-        batch_size = len(env_context)
-        max_column_num = table_column_encoding.size(1)
-
-        constant_value_num = batched_context['constant_spans'].size(1)
         if max_column_num < constant_value_num:
             constant_value_embedding = torch.cat([
                 table_column_encoding,

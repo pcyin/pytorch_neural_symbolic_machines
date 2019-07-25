@@ -84,7 +84,9 @@ def convert_example_to_bert_input(
 
     column_item_delimiter = config.column_item_delimiter
     column_delimiter = config.column_delimiter
-    for col_id, column in enumerate(example.table.header):
+
+    header = example.table.header['columns']
+    for col_id, column in enumerate(header):
         col_tokens = list(column.name_tokens)
 
         if config.use_type_text:
@@ -280,7 +282,7 @@ class TableBERT(BertForMaskedLM):
             question_token_ids[i, :instance['question_length']] = instance['question_token_ids']
             question_token_mask[i, :instance['question_length']] = 1.
 
-            header = examples[i].table.header
+            header = examples[i].table.header['columns']
             for col_id, column in enumerate(header):
                 if column.name in instance['column_spans']:
                     col_start, col_end = instance['column_spans'][column.name][column_span]
