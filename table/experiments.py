@@ -400,6 +400,11 @@ def run_sample():
     print(t3 - t2)
 
 
+def inject_default_values(config: Dict):
+    config.setdefault('table_representation', 'concate')
+    config.setdefault('use_column_type_embedding', False)
+
+
 def distributed_train(args):
     seed = int(args['--seed'])
     config_file = args['--config']
@@ -408,8 +413,7 @@ def distributed_train(args):
     print(f'load config file [{config_file}]', file=sys.stderr)
     config = json.load(open(config_file))
 
-    config.setdefault('table_representation', 'concate')
-    config.setdefault('use_column_type_embedding', False)
+    inject_default_values(config)
 
     if args['--extra-config'] != '{}':
         extra_config = args['--extra-config']
@@ -514,6 +518,8 @@ def test(args):
     print(f'loading model [{model_path}] for evaluation', file=sys.stderr)
     agent = PGAgent.load(model_path, gpu_id=0 if use_gpu else -1).eval()
     config = agent.config
+
+    inject_default_values(config)
 
     test_file = args['--test-file']
     print(f'loading test file [{test_file}]', file=sys.stderr)
