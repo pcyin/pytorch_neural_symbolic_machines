@@ -1550,10 +1550,11 @@ class PGAgent(nn.Module):
         torch.save(params, model_path)
 
     @staticmethod
-    def load(model_path, gpu_id=-1, **kwargs):
+    def load(model_path, default_values_handle, gpu_id=-1, **kwargs):
         device = torch.device("cuda:%d" % gpu_id if gpu_id >= 0 else "cpu")
         params = torch.load(model_path, map_location=lambda storage, loc: storage)
         config = params['config']
+        default_values_handle(config)
         config.update(kwargs)
         kwargs = params['kwargs'] if params['kwargs'] is not None else dict()
 

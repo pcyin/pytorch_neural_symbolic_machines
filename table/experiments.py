@@ -516,10 +516,8 @@ def test(args):
     use_gpu = args['--cuda']
     model_path = args['--model']
     print(f'loading model [{model_path}] for evaluation', file=sys.stderr)
-    agent = PGAgent.load(model_path, gpu_id=0 if use_gpu else -1).eval()
+    agent = PGAgent.load(model_path, gpu_id=0 if use_gpu else -1, default_values_handle=inject_default_values).eval()
     config = agent.config
-
-    inject_default_values(config)
 
     test_file = args['--test-file']
     print(f'loading test file [{test_file}]', file=sys.stderr)
