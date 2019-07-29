@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sys
@@ -98,6 +99,10 @@ class Evaluator(torch_mp.Process):
                 dev_score = eval_results['accuracy']
                 if not dev_scores or max(dev_scores) < dev_score:
                     print(f'[Evaluator] save the current best model', file=sys.stderr)
+
+                    with open(os.path.join(self.config['work_dir'], 'dev.log'), 'w') as f:
+                        f.write(json.dumps(eval_results))
+
                     self.agent.save(os.path.join(self.config['work_dir'], 'model.best.bin'))
 
                 dev_scores.append(dev_score)
