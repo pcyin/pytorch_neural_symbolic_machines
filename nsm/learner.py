@@ -64,10 +64,10 @@ class Learner(torch_mp.Process):
         summary_writer = SummaryWriter(os.path.join(config['work_dir'], 'tb_log/train'))
         max_train_step = config['max_train_step']
 
-        freeze_bert = config.get('freeze_bert', False)
-        if freeze_bert:
-            for p in model.encoder.bert_model.parameters():
-                p.requires_grad = False
+        freeze_bert_for_niter = config.get('freeze_bert_niter', 0)
+        # if freeze_bert:
+        #     for p in model.encoder.bert_model.parameters():
+        #         p.requires_grad = False
 
         no_grad = ['pooler']
         param_optimizer = list([(p_name, p)
@@ -166,7 +166,9 @@ class Learner(torch_mp.Process):
             grad_norm = torch.nn.utils.clip_grad_norm_(other_params, 5.)
 
             optimizer.step()
-            bert_optimizer.step()
+
+            if train_iter > freeze_bert_for_niter:
+                bert_optimizer.step()
             bert_optimizer.zero_grad()
 
             # print(f'[Learner] train_iter={train_iter} loss={loss_val}', file=sys.stderr)
