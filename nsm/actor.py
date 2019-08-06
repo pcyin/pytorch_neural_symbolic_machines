@@ -337,58 +337,61 @@ class Actor(torch_mp.Process):
                         if self.use_sketch_exploration:
                             constraint_sketches = dict()
                             num_sketches_per_example = config.get('num_candidate_sketches', 5)
-                            t1 = time.time()
-                            for env in batched_envs:
-                                print("======", file=debug_file)
-                                print(f"Question [{env.name}] "
-                                      f"{env.question_annotation['question']}", file=debug_file)
-                                env_candidate_sketches = self.sketch_manager.get_sketches_from_similar_questions(
-                                    env.name,
-                                    log_file=debug_file
+                            use_sketch_exploration_for_nepoch = config.get('use_sketch_exploration_for_nepoch', 10000)
+
+                            if epoch_id <= use_sketch_exploration_for_nepoch:
+                                t1 = time.time()
+                                for env in batched_envs:
+                                    print("======", file=debug_file)
+                                    print(f"Question [{env.name}] "
+                                          f"{env.question_annotation['question']}", file=debug_file)
+                                    env_candidate_sketches = self.sketch_manager.get_sketches_from_similar_questions(
+                                        env.name,
+                                        log_file=debug_file
+                                    )
+
+                                    print(f"Candidate sketches in the cache:\n"
+                                          f"{json.dumps({str(k): v for k, v in env_candidate_sketches.items()}, indent=2, default=str)}", file=debug_file)
+
+                                    env_selected_candidate_sketches = sorted(
+                                        env_candidate_sketches,
+                                        key=lambda s: env_candidate_sketches[s]['score'],
+                                        reverse=True)[:num_sketches_per_example]
+
+                                    print(f"Selected sketches for [{env.name}]:\n{json.dumps(env_selected_candidate_sketches, indent=2, default=str)}", file=debug_file)
+                                    constraint_sketches[env.name] = env_selected_candidate_sketches
+                                print(f'Found candidate sketches took {time.time() - t1}s', file=debug_file)
+
+                                t1 = time.time()
+                                sketch_explore_samples = self.agent.new_beam_search(
+                                    batched_envs,
+                                    beam_size=5,
+                                    use_cache=True,
+                                    return_list=True,
+                                    constraint_sketches=constraint_sketches
                                 )
+                                print(f'Perform sketch-constraint beam search took {time.time() - t1}s', file=debug_file)
 
-                                print(f"Candidate sketches in the cache:\n"
-                                      f"{json.dumps({str(k): v for k, v in env_candidate_sketches.items()}, indent=2, default=str)}", file=debug_file)
+                                print('Explored programs:', file=debug_file)
+                                for sample in sketch_explore_samples:
+                                    print(f"[{sample.trajectory.environment_name}] "
+                                          f"{' '.join(sample.trajectory.program)} "
+                                          f"(prob={sample.prob:.4f}, correct={sample.trajectory.reward == 1.})", file=debug_file)
 
-                                env_selected_candidate_sketches = sorted(
-                                    env_candidate_sketches,
-                                    key=lambda s: env_candidate_sketches[s]['score'],
-                                    reverse=True)[:num_sketches_per_example]
+                                # retain samples with high reward
+                                good_explore_samples = [
+                                    sample
+                                    for sample
+                                    in sketch_explore_samples
+                                    if sample.trajectory.reward == 1.
+                                ]
 
-                                print(f"Selected sketches for [{env.name}]:\n{json.dumps(env_selected_candidate_sketches, indent=2, default=str)}", file=debug_file)
-                                constraint_sketches[env.name] = env_selected_candidate_sketches
-                            print(f'Found candidate sketches took {time.time() - t1}s', file=debug_file)
-
-                            t1 = time.time()
-                            sketch_explore_samples = self.agent.new_beam_search(
-                                batched_envs,
-                                beam_size=5,
-                                use_cache=True,
-                                return_list=True,
-                                constraint_sketches=constraint_sketches
-                            )
-                            print(f'Perform sketch-constraint beam search took {time.time() - t1}s', file=debug_file)
-
-                            print('Explored programs:', file=debug_file)
-                            for sample in sketch_explore_samples:
-                                print(f"[{sample.trajectory.environment_name}] "
-                                      f"{' '.join(sample.trajectory.program)} "
-                                      f"(prob={sample.prob:.4f}, correct={sample.trajectory.reward == 1.})", file=debug_file)
-
-                            # retain samples with high reward
-                            good_explore_samples = [
-                                sample
-                                for sample
-                                in sketch_explore_samples
-                                if sample.trajectory.reward == 1.
-                            ]
-
-                            if good_explore_samples:
-                                print(
-                                    f'epoch {epoch_id} batch {batch_id}, '
-                                    f'sampled {len(good_explore_samples)} trajectories from '
-                                    f'sketch exploration', file=debug_file)
-                                self.replay_buffer.save_samples(good_explore_samples)
+                                if good_explore_samples:
+                                    print(
+                                        f'epoch {epoch_id} batch {batch_id}, '
+                                        f'sampled {len(good_explore_samples)} trajectories from '
+                                        f'sketch exploration', file=debug_file)
+                                    self.replay_buffer.save_samples(good_explore_samples)
 
                         # sample replay examples from the replay buffer
                         t1 = time.time()
