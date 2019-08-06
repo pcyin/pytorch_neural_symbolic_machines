@@ -232,6 +232,11 @@ class Learner(torch_mp.Process):
                     program_cache_stat['num_entries'] / program_cache_stat['num_envs'],
                     train_iter
                 )
+                summary_writer.add_scalar(
+                    'num_programs_in_cache',
+                    program_cache_stat['num_entries'],
+                    train_iter
+                )
             else:
                 self.push_new_model(self.current_model_path)
 

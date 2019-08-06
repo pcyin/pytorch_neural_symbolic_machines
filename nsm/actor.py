@@ -449,10 +449,10 @@ class Actor(torch_mp.Process):
                             for sample in replay_samples:
                                 sample.weight = sample.prob / self.replay_buffer.env_program_prob_sum_dict[sample.trajectory.environment_name]
                             train_examples = replay_samples
-                        else:
+                        elif method == 'sample':
                             train_examples = replay_samples
                             for sample in train_examples:
-                                sample.weight = 1.
+                                sample.weight = max(sample.prob, config['min_replay_samples_weight'])
                     except RuntimeError as e:
                         if 'out of memory' in str(e):
                             msg = (
