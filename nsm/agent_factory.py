@@ -1238,14 +1238,14 @@ class PGAgent(nn.Module):
 
         return samples
 
-    def new_beam_search(self, environments, beam_size, use_cache=False, return_list=False):
+    def new_beam_search(self, environments, beam_size, use_cache=False, return_list=False, constraint_sketches=None):
         # if already explored everything, then don't explore this environment anymore.
         if use_cache:
             # if already explored everything, then don't explore this environment anymore.
             environments = [env for env in environments if not env.cache.is_full()]
 
         CandidateHyp = collections.namedtuple('CandidateHyp',
-                                              ['prev_hyp_env', 'rel_action_id', 'score', 'prev_hyp_abs_pos'])
+                                              ['prev_hyp_env', 'action_id', 'rel_action_id', 'score', 'prev_hyp_abs_pos'])
 
         batch_size = len(environments)
         # max_live_hyp_num = 1
@@ -1293,12 +1293,28 @@ class PGAgent(nn.Module):
                 for prev_hyp_id, prev_hyp in enumerate(beam):
                     _cont_action_scores = beam_new_cont_scores[prev_hyp_id][prev_hyp.env.obs[-1].valid_action_indices].cpu()
                     for rel_action_id, new_hyp_score in enumerate(_cont_action_scores):
+                        abs_action_id = prev_hyp.env.obs[-1].valid_action_indices[rel_action_id]
                         new_hyp_score = new_hyp_score.item()
                         if not math.isinf(new_hyp_score):
-                            continuing_candidates[env_name].append(CandidateHyp(prev_hyp_env=prev_hyp.env,
-                                                                                rel_action_id=rel_action_id,
-                                                                                score=new_hyp_score,
-                                                                                prev_hyp_abs_pos=beam_start + prev_hyp_id))
+                            candidate_hyp = CandidateHyp(
+                                prev_hyp_env=prev_hyp.env,
+                                rel_action_id=rel_action_id,
+                                action_id=abs_action_id,
+                                score=new_hyp_score,
+                                prev_hyp_abs_pos=beam_start + prev_hyp_id
+                            )
+
+                            if constraint_sketches is not None:
+                                is_compatible = any(
+                                    sketch.is_compatible_with_hypothesis(candidate_hyp)
+                                    for sketch
+                                    in constraint_sketches[env_name]
+                                )
+                            else:
+                                is_compatible = True
+
+                            if is_compatible:
+                                continuing_candidates[env_name].append(candidate_hyp)
 
                 # rank all hypotheses together with completed ones
                 all_candidates = completed_hyps[env_name] + continuing_candidates[env_name]

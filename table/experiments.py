@@ -444,9 +444,13 @@ def distributed_train(args):
         learner_device = evaluator_device = torch.device('cpu')
         actor_devices.append(torch.device('cpu'))
 
+    shared_program_cache = SharedProgramCache()
+
     learner = Learner(
-        {**config, **{'seed': seed}},
-        device=learner_device)
+        config={**config, **{'seed': seed}},
+        shared_program_cache=shared_program_cache,
+        device=learner_device
+    )
 
     print(f'Evaluator uses device {evaluator_device}', file=sys.stderr)
     evaluator = Evaluator(
@@ -464,7 +468,6 @@ def distributed_train(args):
         actor_id = shard_id % actor_num
         actor_shard_dict[actor_id].append(shard_id)
 
-    shared_program_cache = SharedProgramCache()
     for actor_id in range(actor_num):
         actor = Actor(
             actor_id,

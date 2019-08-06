@@ -224,6 +224,14 @@ class Learner(torch_mp.Process):
                 t1 = time.time()
 
                 self.update_model_to_actors(train_iter)
+
+                # log stats of the program cache
+                program_cache_stat = self.shared_program_cache.stat()
+                summary_writer.add_scalar(
+                    'avg_num_programs_in_cache',
+                    program_cache_stat['num_entries'] / program_cache_stat['num_envs'],
+                    train_iter
+                )
             else:
                 self.push_new_model(self.current_model_path)
 

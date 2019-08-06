@@ -6,6 +6,7 @@ import re
 import sys
 import time
 import json
+from pathlib import Path
 from typing import List, Dict
 
 import numpy as np
@@ -22,6 +23,7 @@ import torch
 
 from nsm.program_cache import SharedProgramCache
 from nsm.dist_util import STOP_SIGNAL
+from nsm.sketch.sketch import SketchManager
 
 
 def normalize_probs(p_list):
@@ -241,6 +243,10 @@ class Actor(torch_mp.Process):
     def use_consistency_model(self):
         return self.config['use_consistency_model']
 
+    @property
+    def use_sketch_exploration(self):
+        return self.config.get('use_sketch_exploration', False)
+
     def run(self):
         # initialize cuda context
         self.device = torch.device(self.device)
@@ -266,6 +272,13 @@ class Actor(torch_mp.Process):
                                                       log_file=os.path.join(self.config['work_dir'], f'consistency_model_actor_{self.actor_id}.log'),
                                                       debug=self.actor_id == 0)
 
+        if self.use_sketch_exploration:
+            print(f'[Actor {self.actor_id}] Loading sketch manager', file=sys.stderr)
+            self.sketch_manager = SketchManager(
+                self.shared_program_cache,
+                QuestionSimilarityModel.load(self.config['question_similarity_model_path'])
+            )
+
         # create agent and set it to evaluation mode
         if 'cuda' in str(self.device.type):
             torch.cuda.set_device(self.device)
@@ -288,6 +301,8 @@ class Actor(torch_mp.Process):
         method = self.config['method']
         assert sample_method in ('sample', 'beam_search')
         assert method in ('sample', 'mapo', 'mml')
+
+        debug_file = (Path(self.config['work_dir']) / f'debug.actor{self.actor_id}.log').open('w')
 
         with torch.no_grad():
             while True:
@@ -318,6 +333,62 @@ class Actor(torch_mp.Process):
                         #           f'add 1 traj [{sample.trajectory}] for env [{sample.trajectory.environment_name}] to buffer',
                         #           file=sys.stderr)
                         self.replay_buffer.save_samples(good_explore_samples)
+
+                        if self.use_sketch_exploration:
+                            constraint_sketches = dict()
+                            num_sketches_per_example = config.get('num_candidate_sketches', 5)
+                            t1 = time.time()
+                            for env in batched_envs:
+                                print("======", file=debug_file)
+                                print(f"Question [{env.name}] "
+                                      f"{env.question_annotation['question']}", file=debug_file)
+                                env_candidate_sketches = self.sketch_manager.get_sketches_from_similar_questions(
+                                    env.name,
+                                    log_file=debug_file
+                                )
+
+                                print(f"Candidate sketches in the cache:\n"
+                                      f"{json.dumps({str(k): v for k, v in env_candidate_sketches.items()}, indent=2, default=str)}", file=debug_file)
+
+                                env_selected_candidate_sketches = sorted(
+                                    env_candidate_sketches,
+                                    key=lambda s: env_candidate_sketches[s]['score'],
+                                    reverse=True)[:num_sketches_per_example]
+
+                                print(f"Selected sketches for [{env.name}]:\n{json.dumps(env_selected_candidate_sketches, indent=2, default=str)}", file=debug_file)
+                                constraint_sketches[env.name] = env_selected_candidate_sketches
+                            print(f'Found candidate sketches took {time.time() - t1}s', file=debug_file)
+
+                            t1 = time.time()
+                            sketch_explore_samples = self.agent.new_beam_search(
+                                batched_envs,
+                                beam_size=5,
+                                use_cache=True,
+                                return_list=True,
+                                constraint_sketches=constraint_sketches
+                            )
+                            print(f'Perform sketch-constraint beam search took {time.time() - t1}s', file=debug_file)
+
+                            print('Explored programs:', file=debug_file)
+                            for sample in sketch_explore_samples:
+                                print(f"[{sample.trajectory.environment_name}] "
+                                      f"{' '.join(sample.trajectory.program)} "
+                                      f"(prob={sample.prob:.4f}, correct={sample.trajectory.reward == 1.})", file=debug_file)
+
+                            # retain samples with high reward
+                            good_explore_samples = [
+                                sample
+                                for sample
+                                in sketch_explore_samples
+                                if sample.trajectory.reward == 1.
+                            ]
+
+                            if good_explore_samples:
+                                print(
+                                    f'epoch {epoch_id} batch {batch_id}, '
+                                    f'sampled {len(good_explore_samples)} trajectories from '
+                                    f'sketch exploration', file=debug_file)
+                                self.replay_buffer.save_samples(good_explore_samples)
 
                         # sample replay examples from the replay buffer
                         t1 = time.time()
@@ -402,6 +473,7 @@ class Actor(torch_mp.Process):
                         continue
 
                     self.check_and_load_new_model()
+                    debug_file.flush()
 
                     if self.device.type == 'cuda':
                         mem_cached_mb = torch.cuda.memory_cached() / 1000000
