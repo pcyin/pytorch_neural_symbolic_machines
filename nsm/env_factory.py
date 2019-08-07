@@ -119,6 +119,7 @@ class Trajectory(object):
                  answer: Any,
                  reward: float,
                  program: List[str] = None,
+                 human_readable_program: List[str] = None,
                  id: str = None):
         self.id = id
         self.environment_name = environment_name
@@ -129,6 +130,7 @@ class Trajectory(object):
         self.answer = answer
         self.reward = reward
         self.program = program
+        self.human_readable_program = human_readable_program
 
         self._hash = hash((self.environment_name, ' '.join(str(a) for a in self.tgt_action_ids)))
 
@@ -136,7 +138,10 @@ class Trajectory(object):
         return self._hash
 
     def __repr__(self):
-        if self.program:
+        if self.human_readable_program:
+            return ' '.join(self.human_readable_program)
+
+        elif self.program:
             return ' '.join(self.program)
 
         return '[Undecoded Program] ' + ' '.join(map(str, self.tgt_action_ids))
@@ -145,12 +150,16 @@ class Trajectory(object):
 
     @classmethod
     def from_environment(cls, env):
-        return Trajectory(env.name, observations=env.obs,
-                          context=env.get_context(),
-                          tgt_action_ids=env.mapped_actions,
-                          answer=env.interpreter.result,
-                          reward=env.rewards[-1],
-                          program=env.de_vocab.lookup(env.mapped_actions, reverse=True))
+        return Trajectory(
+            env.name,
+            observations=env.obs,
+            context=env.get_context(),
+            tgt_action_ids=env.mapped_actions,
+            answer=env.interpreter.result,
+            reward=env.rewards[-1],
+            program=env.program,
+            human_readable_program=env.to_human_readable_program()
+        )
 
     @classmethod
     def from_program(cls, env, program):
@@ -356,9 +365,10 @@ class QAProgrammingEnv(Environment):
             mapped_action = self.valid_actions[action]
 
         self.mapped_actions.append(mapped_action)
+        mapped_action_token = self.de_vocab.lookup(mapped_action, reverse=True)
+        self.program.append(mapped_action_token)
 
-        result = self.interpreter.read_token(
-            self.de_vocab.lookup(mapped_action, reverse=True))
+        result = self.interpreter.read_token(mapped_action_token)
 
         self.done = self.interpreter.done
         # Only when the program is finished and it doesn't have
@@ -434,6 +444,7 @@ class QAProgrammingEnv(Environment):
     def reset(self):
         self.actions = []
         self.mapped_actions = []
+        self.program = []
         self.rewards = []
         self.done = False
         valid_actions = self.de_vocab.lookup(self.interpreter.valid_tokens())
@@ -472,6 +483,7 @@ class QAProgrammingEnv(Environment):
         )
         new.actions = self.actions[:]
         new.mapped_actions = self.mapped_actions[:]
+        new.program = self.program[:]
         new.rewards = self.rewards[:]
         new.obs = self.obs[:]
         new.done = self.done
@@ -493,6 +505,31 @@ class QAProgrammingEnv(Environment):
             self.de_vocab.lookup([o.read_ind for o in self.obs], reverse=True))
         valid_tokens = ' '.join(self.de_vocab.lookup(self.valid_actions, reverse=True))
         return 'program: {}\nvalid tokens: {}'.format(program, valid_tokens)
+
+    def get_human_readable_action_token(self, program_token: str) -> str:
+        if program_token.startswith('v'):
+            mem_entry = self.interpreter.namespace[program_token]
+            if mem_entry['is_constant']:
+                if isinstance(mem_entry['value'], list):
+                    value = ', '.join(map(str, mem_entry['value']))
+                else:
+                    value = str(mem_entry['value'])
+
+                token = f"{program_token}:{value}"
+            else:
+                token = program_token
+        else:
+            token = program_token
+
+        return token
+
+    def to_human_readable_program(self):
+        readable_program = []
+        for token in self.program:
+            readable_token = self.get_human_readable_action_token(token)
+            readable_program.append(readable_token)
+
+        return readable_program
 
 
 class SearchCache(object):
