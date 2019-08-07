@@ -1,5 +1,6 @@
 import heapq
 import math
+import multiprocessing
 import os
 import random
 import re
@@ -302,7 +303,11 @@ class Actor(torch_mp.Process):
         assert sample_method in ('sample', 'beam_search')
         assert method in ('sample', 'mapo', 'mml')
 
-        debug_file = (Path(self.config['work_dir']) / f'debug.actor{self.actor_id}.log').open('w')
+        work_dir = Path(self.config['work_dir'])
+        log_dir = work_dir / 'log'
+        log_dir.mkdir(exist_ok=True, parents=True)
+
+        debug_file = (log_dir / f'debug.actor{self.actor_id}.log').open('w')
 
         with torch.no_grad():
             while True:
@@ -493,6 +498,27 @@ class Actor(torch_mp.Process):
                 # buffer_save_path = os.path.join(config['work_dir'], f'replay_buffer_actor{self.actor_id}_epoch{epoch_id}.json')
                 # with open(buffer_save_path, 'w') as f:
                 #     json.dump(buffer_content, f, indent=2)
+
+                # dump program cache for the current actor
+                cur_program_cache = self.replay_buffer.all_samples()
+                with multiprocessing.Lock():
+                    program_cache_save_file = log_dir / f'program_cache.epoch{epoch_id}.jsonl'
+
+                    with program_cache_save_file.open('a') as f:
+                        for env_name, samples in cur_program_cache.items():
+                            entry = {
+                                'question_id': env_name,
+                                'hypotheses': [
+                                    {
+                                        'program': ' '.join(sample.trajectory.human_readable_program),
+                                        'prob': sample.prob
+                                    }
+                                    for sample in samples
+                                ]
+                            }
+                            line = json.dumps(entry)
+                            f.write(line + os.linesep)
+
                 if self.consistency_model:
                     self.consistency_model.log_file.flush()
                     sys.stderr.flush()
