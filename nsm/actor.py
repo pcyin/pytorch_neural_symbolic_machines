@@ -141,7 +141,8 @@ class ReplayBuffer(object):
 
         return samples
 
-    def replay(self, environments, n_samples=1, use_top_k=False, truncate_at_n=0, replace=True, consistency_model = None):
+    def replay(self, environments, n_samples=1, use_top_k=False, truncate_at_n=0, replace=True,
+               consistency_model=None, constraint_sketches=None, debug_file=None):
         select_env_names = set([e.name for e in environments])
         trajs = []
 
@@ -172,6 +173,12 @@ class ReplayBuffer(object):
         for env_name, samples in env_sample_dict.items():
             n = len(samples)
 
+            # Compute the sum of prob of replays in the buffer.
+            self.env_program_prob_sum_dict[env_name] = sum([sample.prob for sample in samples])
+
+            for sample in samples:
+                self.update_program_prob(env_name, sample.trajectory.program, sample.prob)
+
             # Truncated the number of samples in the selected
             # samples and in the buffer.
             if 0 < truncate_at_n < n:
@@ -181,13 +188,6 @@ class ReplayBuffer(object):
                 random.shuffle(samples)
                 samples = heapq.nlargest(
                     truncate_at_n, samples, key=lambda s: s.prob)
-                self.trajectory_buffer[env_name] = [sample.traj for sample in samples]
-
-            # Compute the sum of prob of replays in the buffer.
-            self.env_program_prob_sum_dict[env_name] = sum([sample.prob for sample in samples])
-
-            for sample in samples:
-                self.update_program_prob(env_name, sample.trajectory.program, sample.prob)
 
             if use_top_k:
                 # Select the top k samples weighted by their probs.
@@ -197,6 +197,28 @@ class ReplayBuffer(object):
             else:
                 # Randomly samples according to their probs.
 
+                has_any_constraint_sketches = constraint_sketches and constraint_sketches[env_name]
+                if has_any_constraint_sketches:
+                    question_constraint_sketches = constraint_sketches[env_name]
+                    samples = [
+                        sample
+                        for sample in samples
+                        if any(
+                            sketch.is_compatible_with_program(sample.trajectory.program)
+                            for sketch in question_constraint_sketches
+                        )
+                    ]
+                    if len(samples) == 0:
+                        continue
+
+                    if debug_file:
+                        print("Compatible Samples for Replay:", file=debug_file)
+                        for sample in samples:
+                            print(
+                                f"[{env_name}] {' '.join(sample.trajectory.program)} (prob={sample.prob})",
+                                file=debug_file
+                            )
+
                 if consistency_model:
                     # log_p_samples = np.log([sample.prob for sample in samples])
                     p_samples = consistency_model.compute_consistency_and_rescore(env_name, samples)
@@ -205,7 +227,10 @@ class ReplayBuffer(object):
                     p_samples = normalize_probs([sample.prob for sample in samples])
 
                 if replace:
-                    selected_sample_indices = np.random.choice(len(samples), n_samples, p=p_samples)
+                    selected_sample_indices = np.random.choice(
+                        len(samples),
+                        size=n_samples,
+                        p=p_samples)
                 else:
                     sample_num = min(len(samples), n_samples)
                     selected_sample_indices = np.random.choice(len(samples), sample_num, p=p_samples, replace=False)
@@ -248,6 +273,10 @@ class Actor(torch_mp.Process):
     def use_sketch_exploration(self):
         return self.config.get('use_sketch_exploration', False)
 
+    @property
+    def use_sketch_guided_replay(self):
+        return self.config.get('use_sketch_guided_replay', False)
+
     def run(self):
         # initialize cuda context
         self.device = torch.device(self.device)
@@ -273,7 +302,7 @@ class Actor(torch_mp.Process):
                                                       log_file=os.path.join(self.config['work_dir'], f'consistency_model_actor_{self.actor_id}.log'),
                                                       debug=self.actor_id == 0)
 
-        if self.use_sketch_exploration:
+        if self.use_sketch_exploration or self.use_sketch_guided_replay:
             print(f'[Actor {self.actor_id}] Loading sketch manager', file=sys.stderr)
             self.sketch_manager = SketchManager(
                 self.shared_program_cache,
@@ -400,11 +429,47 @@ class Actor(torch_mp.Process):
 
                         # sample replay examples from the replay buffer
                         t1 = time.time()
-                        replay_samples = self.replay_buffer.replay(batched_envs,
-                                                                   n_samples=config['n_replay_samples'],
-                                                                   use_top_k=config['use_top_k_replay_samples'],
-                                                                   replace=config['replay_sample_with_replacement'],
-                                                                   consistency_model=self.consistency_model)
+                        replay_constraint_sketches = None
+                        if self.use_sketch_guided_replay:
+                            replay_constraint_sketches = dict()
+                            num_sketches_per_example = config.get('num_candidate_sketches', 5)
+
+                            for env in batched_envs:
+                                print("======begin sketch guided reply======", file=debug_file)
+                                print(f"Question [{env.name}] "
+                                      f"{env.question_annotation['question']}", file=debug_file)
+
+                                env_candidate_sketches = self.sketch_manager.get_sketches_from_similar_questions(
+                                    env.name,
+                                    remove_explored=False,
+                                    log_file=debug_file
+                                )
+
+                                print(
+                                    f"Candidate sketches in the cache:\n"
+                                    f"{json.dumps({str(k): v for k, v in env_candidate_sketches.items()}, indent=2, default=str)}",
+                                    file=debug_file
+                                )
+
+                                env_selected_candidate_sketches = sorted(
+                                    env_candidate_sketches,
+                                    key=lambda s: env_candidate_sketches[s]['score'],
+                                    reverse=True)[:num_sketches_per_example]
+
+                                replay_constraint_sketches[env.name] = env_selected_candidate_sketches
+
+                                print("======end sketch guided reply======", file=debug_file)
+
+                        replay_samples = self.replay_buffer.replay(
+                            batched_envs,
+                            n_samples=config['n_replay_samples'],
+                            use_top_k=config['use_top_k_replay_samples'],
+                            replace=config['replay_sample_with_replacement'],
+                            truncate_at_n=config.get('sample_replay_from_topk', 0),
+                            consistency_model=self.consistency_model,
+                            constraint_sketches=replay_constraint_sketches,
+                            debug_file=debug_file
+                        )
                         t2 = time.time()
                         print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, got {len(replay_samples)} replay samples (took {t2 - t1}s)',
                               file=sys.stderr)

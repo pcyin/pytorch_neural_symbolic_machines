@@ -40,8 +40,11 @@ class Sketch(object):
         traj_action_ids = hypothesis.prev_hyp_env.mapped_actions + [hypothesis.action_id]
         hyp_program = hypothesis.prev_hyp_env.de_vocab.lookup(traj_action_ids, reverse=True)
 
+        return self.is_compatible_with_program(hyp_program)
+
+    def is_compatible_with_program(self, program):
         is_compatible = True
-        for p_token, s_token in zip(hyp_program, self.tokens):
+        for p_token, s_token in zip(program, self.tokens):
             if p_token.startswith('v'):
                 p_token = 'v'
 
