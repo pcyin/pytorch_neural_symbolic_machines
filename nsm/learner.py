@@ -169,6 +169,10 @@ class Learner(torch_mp.Process):
 
             if train_iter > freeze_bert_for_niter:
                 bert_optimizer.step()
+            elif train_iter == freeze_bert_for_niter:
+                print(f'[Learner] train_iter={train_iter} reset Adam optimizer and start fine-tuning BERT')
+                optimizer = torch.optim.Adam(other_params, lr=0.001)
+
             bert_optimizer.zero_grad()
 
             # print(f'[Learner] train_iter={train_iter} loss={loss_val}', file=sys.stderr)
