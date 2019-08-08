@@ -371,6 +371,10 @@ class Actor(torch_mp.Process):
                         if self.use_sketch_exploration:
                             constraint_sketches = dict()
                             num_sketches_per_example = config.get('num_candidate_sketches', 5)
+                            remove_explored_sketch = config.get('remove_explored_sketch', True)
+                            explore_beam_size = config.get('sketch_explore_beam_size', 5)
+                            strict_constraint_on_sketches = config.get('sketch_explore_strict_constraint_on_sketch', True)
+                            force_sketch_coverage = config.get('sketch_explore_force_coverage', False)
                             use_sketch_exploration_for_nepoch = config.get('use_sketch_exploration_for_nepoch', 10000)
 
                             if epoch_id <= use_sketch_exploration_for_nepoch:
@@ -381,6 +385,7 @@ class Actor(torch_mp.Process):
                                           f"{env.question_annotation['question']}", file=debug_file)
                                     env_candidate_sketches = self.sketch_manager.get_sketches_from_similar_questions(
                                         env.name,
+                                        remove_explored=remove_explored_sketch,
                                         log_file=debug_file
                                     )
 
@@ -399,10 +404,12 @@ class Actor(torch_mp.Process):
                                 t1 = time.time()
                                 sketch_explore_samples = self.agent.new_beam_search(
                                     batched_envs,
-                                    beam_size=5,
+                                    beam_size=explore_beam_size,
                                     use_cache=True,
                                     return_list=True,
-                                    constraint_sketches=constraint_sketches
+                                    constraint_sketches=constraint_sketches,
+                                    strict_constraint_on_sketches=strict_constraint_on_sketches,
+                                    force_sketch_coverage=force_sketch_coverage
                                 )
                                 print(f'Perform sketch-constraint beam search took {time.time() - t1}s', file=debug_file)
 

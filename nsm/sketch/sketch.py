@@ -37,8 +37,15 @@ class Sketch(object):
         return not self.__eq__(other)
 
     def is_compatible_with_hypothesis(self, hypothesis: Any):
-        traj_action_ids = hypothesis.prev_hyp_env.mapped_actions + [hypothesis.action_id]
-        hyp_program = hypothesis.prev_hyp_env.de_vocab.lookup(traj_action_ids, reverse=True)
+        if hasattr(hypothesis, 'prev_hyp_env'):
+            traj_action_ids = hypothesis.prev_hyp_env.mapped_actions + [hypothesis.action_id]
+            env = hypothesis.prev_hyp_env
+        else:
+            assert hasattr(hypothesis, 'env')  # it's a completed hypothesis
+            traj_action_ids = hypothesis.env.mapped_actions
+            env = hypothesis.env
+
+        hyp_program = env.de_vocab.lookup(traj_action_ids, reverse=True)
 
         return self.is_compatible_with_program(hyp_program)
 

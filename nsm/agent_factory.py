@@ -1238,7 +1238,11 @@ class PGAgent(nn.Module):
 
         return samples
 
-    def new_beam_search(self, environments, beam_size, use_cache=False, return_list=False, constraint_sketches=None):
+    def new_beam_search(self, environments, beam_size, use_cache=False, return_list=False,
+                        constraint_sketches=None, strict_constraint_on_sketches=False, force_sketch_coverage=False):
+        if strict_constraint_on_sketches or force_sketch_coverage:
+            assert constraint_sketches is not None
+
         # if already explored everything, then don't explore this environment anymore.
         if use_cache:
             # if already explored everything, then don't explore this environment anymore.
@@ -1304,7 +1308,7 @@ class PGAgent(nn.Module):
                                 prev_hyp_abs_pos=beam_start + prev_hyp_id
                             )
 
-                            if constraint_sketches is not None:
+                            if strict_constraint_on_sketches:
                                 is_compatible = any(
                                     sketch.is_compatible_with_hypothesis(candidate_hyp)
                                     for sketch
@@ -1318,28 +1322,80 @@ class PGAgent(nn.Module):
 
                 # rank all hypotheses together with completed ones
                 all_candidates = completed_hyps[env_name] + continuing_candidates[env_name]
-                top_k_candidates = heapq.nlargest(beam_size, all_candidates, key=lambda x: x.score)
+                all_candidates.sort(key=lambda hyp: hyp.score, reverse=True)
+
+                # top_k_candidates = heapq.nlargest(beam_size, all_candidates, key=lambda x: x.score)
                 completed_hyps[env_name] = []
 
-                for cand_hyp in top_k_candidates:
-                    if isinstance(cand_hyp, Hypothesis):
-                        completed_hyps[env_name].append(cand_hyp)
+                def _add_hypothesis_to_new_beam(_hyp):
+                    if isinstance(_hyp, Hypothesis):
+                        completed_hyps[env_name].append(_hyp)
                     else:
-                        new_hyp_env = cand_hyp.prev_hyp_env.clone()
+                        new_hyp_env = _hyp.prev_hyp_env.clone()
 
-                        ob_t, _, _, info = new_hyp_env.step(cand_hyp.rel_action_id)
+                        ob_t, _, _, info = new_hyp_env.step(_hyp.rel_action_id)
 
                         if new_hyp_env.done:
                             if not new_hyp_env.error:
-                                new_hyp = Hypothesis(env=new_hyp_env, score=cand_hyp.score)
+                                new_hyp = Hypothesis(env=new_hyp_env, score=_hyp.score)
                                 completed_hyps[new_hyp_env.name].append(new_hyp)
                         else:
-                            new_hyp = Hypothesis(env=new_hyp_env, score=cand_hyp.score)
+                            new_hyp = Hypothesis(env=new_hyp_env, score=_hyp.score)
                             new_beams.setdefault(env_name, []).append(new_hyp)
 
-                            new_hyp_parent_abs_pos_list.append(cand_hyp.prev_hyp_abs_pos)
+                            new_hyp_parent_abs_pos_list.append(_hyp.prev_hyp_abs_pos)
                             observations_t.append(ob_t)
-                            new_hyp_scores.append(cand_hyp.score)
+                            new_hyp_scores.append(_hyp.score)
+
+                new_beam_size = 0
+                if force_sketch_coverage:
+                    env_new_beam_not_covered_sketches = set(constraint_sketches[env_name])
+
+                for cand_hyp in all_candidates:
+                    if new_beam_size < beam_size:
+                        _add_hypothesis_to_new_beam(cand_hyp)
+
+                        if force_sketch_coverage:
+                            cand_hyp_covered_sketches = set(
+                                sketch
+                                for sketch
+                                in env_new_beam_not_covered_sketches
+                                if sketch.is_compatible_with_hypothesis(cand_hyp))
+                            env_new_beam_not_covered_sketches -= cand_hyp_covered_sketches
+
+                    # make sure each sketch has at least one candidate hypothesis in the new beam
+                    elif force_sketch_coverage and env_new_beam_not_covered_sketches:
+                        cand_hyp_covered_sketches = set(
+                            sketch
+                            for sketch
+                            in env_new_beam_not_covered_sketches
+                            if sketch.is_compatible_with_hypothesis(cand_hyp))
+
+                        if cand_hyp_covered_sketches:
+                            _add_hypothesis_to_new_beam(cand_hyp)
+                            env_new_beam_not_covered_sketches -= cand_hyp_covered_sketches
+
+                    new_beam_size += 1
+
+                # for cand_hyp in top_k_candidates:
+                #     if isinstance(cand_hyp, Hypothesis):
+                #         completed_hyps[env_name].append(cand_hyp)
+                #     else:
+                #         new_hyp_env = cand_hyp.prev_hyp_env.clone()
+                #
+                #         ob_t, _, _, info = new_hyp_env.step(cand_hyp.rel_action_id)
+                #
+                #         if new_hyp_env.done:
+                #             if not new_hyp_env.error:
+                #                 new_hyp = Hypothesis(env=new_hyp_env, score=cand_hyp.score)
+                #                 completed_hyps[new_hyp_env.name].append(new_hyp)
+                #         else:
+                #             new_hyp = Hypothesis(env=new_hyp_env, score=cand_hyp.score)
+                #             new_beams.setdefault(env_name, []).append(new_hyp)
+                #
+                #             new_hyp_parent_abs_pos_list.append(cand_hyp.prev_hyp_abs_pos)
+                #             observations_t.append(ob_t)
+                #             new_hyp_scores.append(cand_hyp.score)
 
                 beam_start = beam_end
 
