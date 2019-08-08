@@ -21,7 +21,8 @@ import os
 import sys
 import time
 from collections import OrderedDict
-from typing import List, Dict
+from pathlib import Path
+from typing import List, Dict, Iterable
 import ctypes
 import numpy as np
 import torch
@@ -209,10 +210,22 @@ def get_sample_value(raw_column_name, table, bert_tokenizer):
 
 
 def load_environments(example_files: List[str], table_file: str, vocab_file: str, en_vocab_file: str,
-                      embedding_file: str, config: Dict, column_annotation_file: str = None, bert_model: str = None):
+                      embedding_file: str, config: Dict,
+                      example_ids: Iterable = None,
+                      column_annotation_file: str = None, bert_model: str = None):
     dataset = []
+    if example_ids is not None:
+        example_ids = set(example_ids)
+
     for fn in example_files:
-        dataset += load_jsonl(fn)
+        data = load_jsonl(fn)
+        for example in data:
+            if example_ids:
+                if example['id'] in example_ids:
+                    dataset.append(example)
+            else:
+                dataset.append(example)
+
     print('{} examples in dataset.'.format(len(dataset)))
 
     tables = load_jsonl(table_file)
@@ -461,17 +474,30 @@ def distributed_train(args):
     actor_num = config['actor_num']
     print('initializing %d actors' % actor_num, file=sys.stderr)
     actors = []
-    actor_shard_dict = {i: [] for i in range(actor_num)}
+    # actor_shard_dict = {i: [] for i in range(actor_num)}
+    train_shard_dir = Path(config['train_shard_dir'])
     shard_start_id = config['shard_start_id']
     shard_end_id = config['shard_end_id']
+    train_example_ids = []
     for shard_id in range(shard_start_id, shard_end_id):
-        actor_id = shard_id % actor_num
-        actor_shard_dict[actor_id].append(shard_id)
+        shard_data = load_jsonl(train_shard_dir / f"{config['train_shard_prefix']}{shard_id}.jsonl")
+        train_example_ids.extend(
+            e['id']
+            for e
+            in shard_data
+        )
 
+        # actor_id = shard_id % actor_num
+        # actor_shard_dict[actor_id].append(shard_id)
+
+    per_actor_example_num = len(train_example_ids) // actor_num
     for actor_id in range(actor_num):
         actor = Actor(
             actor_id,
-            shard_ids=actor_shard_dict[actor_id],
+            example_ids=train_example_ids[
+                actor_id * per_actor_example_num:
+                ((actor_id + 1) * per_actor_example_num) if actor_id < actor_num - 1 else len(train_example_ids)
+            ],
             shared_program_cache=shared_program_cache,
             device=actor_devices[actor_id % len(actor_devices)],
             config={**config, **{'seed': seed + 2 + actor_id}},)

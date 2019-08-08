@@ -244,7 +244,7 @@ class ReplayBuffer(object):
 
 
 class Actor(torch_mp.Process):
-    def __init__(self, actor_id, shard_ids, shared_program_cache, device, config):
+    def __init__(self, actor_id, example_ids, shared_program_cache, device, config):
         super(Actor, self).__init__(daemon=True)
 
         # self.checkpoint_queue = checkpoint_queue
@@ -253,10 +253,10 @@ class Actor(torch_mp.Process):
 
         self.config = config
         self.actor_id = actor_id
-        self.shard_ids = shard_ids
+        self.example_ids = example_ids
         self.device = device
 
-        if not self.shard_ids:
+        if not self.example_ids:
             raise RuntimeError(f'empty shard for Actor {self.actor_id}')
 
         self.model_path = None
@@ -291,7 +291,14 @@ class Actor(torch_mp.Process):
                 self.config['train_shard_dir'], self.config['train_shard_prefix'] + str(i) + '.jsonl')
 
         # load environments
-        self.load_environments([get_train_shard_path(i) for i in self.shard_ids])
+        self.load_environments(
+            [
+                get_train_shard_path(i)
+                for i
+                in range(self.config['shard_start_id'], self.config['shard_end_id'])
+            ],
+            example_ids=self.example_ids
+        )
 
         if self.use_consistency_model:
             print('Load consistency model', file=sys.stderr)
@@ -595,9 +602,10 @@ class Actor(torch_mp.Process):
                     self.consistency_model.log_file.flush()
                     sys.stderr.flush()
 
-    def load_environments(self, file_paths):
+    def load_environments(self, file_paths, example_ids=None):
         from table.experiments import load_environments, create_environments
         envs = load_environments(file_paths,
+                                 example_ids=example_ids,
                                  table_file=self.config['table_file'],
                                  vocab_file=self.config['vocab_file'],
                                  en_vocab_file=self.config['en_vocab_file'],
