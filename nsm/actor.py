@@ -110,12 +110,12 @@ class ReplayBuffer(object):
 
     def update_program_prob(self, env_name, program: List[str], prob: float):
         self.env_program_prob_dict[env_name][' '.join(program)] = prob
-        self.shared_program_cache.update_hypothesis(env_name, program, prob)
+        self.shared_program_cache.update_hypothesis_prob(env_name, program, prob)
 
     def add_trajectory(self, trajectory: Trajectory, prob=None):
         program = trajectory.program
 
-        self.shared_program_cache.add_hypothesis(trajectory.environment_name, program, prob)
+        self.shared_program_cache.add_trajectory(trajectory, prob)
         self.env_program_prob_dict.setdefault(trajectory.environment_name, dict())[' '.join(program)] = prob
 
         self.trajectory_buffer.setdefault(trajectory.environment_name, []).append(trajectory)
@@ -579,24 +579,24 @@ class Actor(torch_mp.Process):
                 #     json.dump(buffer_content, f, indent=2)
 
                 # dump program cache for the current actor
-                cur_program_cache = self.replay_buffer.all_samples()
-                with multiprocessing.Lock():
-                    program_cache_save_file = log_dir / f'program_cache.epoch{epoch_id}.jsonl'
-
-                    with program_cache_save_file.open('a') as f:
-                        for env_name, samples in cur_program_cache.items():
-                            entry = {
-                                'question_id': env_name,
-                                'hypotheses': [
-                                    {
-                                        'program': ' '.join(sample.trajectory.human_readable_program),
-                                        'prob': sample.prob
-                                    }
-                                    for sample in samples
-                                ]
-                            }
-                            line = json.dumps(entry)
-                            f.write(line + os.linesep)
+                # cur_program_cache = self.replay_buffer.all_samples()
+                # with multiprocessing.Lock():
+                #     program_cache_save_file = log_dir / f'program_cache.epoch{epoch_id}.jsonl'
+                #
+                #     with program_cache_save_file.open('a') as f:
+                #         for env_name, samples in cur_program_cache.items():
+                #             entry = {
+                #                 'question_id': env_name,
+                #                 'hypotheses': [
+                #                     {
+                #                         'program': ' '.join(sample.trajectory.human_readable_program),
+                #                         'prob': sample.prob
+                #                     }
+                #                     for sample in samples
+                #                 ]
+                #             }
+                #             line = json.dumps(entry)
+                #             f.write(line + os.linesep)
 
                 if self.consistency_model:
                     self.consistency_model.log_file.flush()

@@ -1,9 +1,11 @@
 import ctypes
 import heapq
+import json
 import os
 import random
 import time
 from itertools import chain
+from pathlib import Path
 from typing import List, Dict
 
 import numpy as np
@@ -58,12 +60,13 @@ class Learner(torch_mp.Process):
     def train(self):
         model = self.agent
         config = self.config
+        work_dir = Path(config['work_dir'])
         train_iter = 0
         save_every_niter = config['save_every_niter']
         entropy_reg_weight = config['entropy_reg_weight']
         summary_writer = SummaryWriter(os.path.join(config['work_dir'], 'tb_log/train'))
         max_train_step = config['max_train_step']
-
+        save_program_cache_niter = config.get('save_program_cache_niter', 0)
         freeze_bert_for_niter = config.get('freeze_bert_niter', 0)
         # if freeze_bert:
         #     for p in model.encoder.bert_model.parameters():
@@ -244,6 +247,14 @@ class Learner(torch_mp.Process):
             else:
                 self.push_new_model(self.current_model_path)
 
+            if save_program_cache_niter > 0 and train_iter % save_program_cache_niter == 0:
+                program_cache_file = work_dir / 'log' / f'program_cache.iter{train_iter}.json'
+                program_cache = self.shared_program_cache.all_programs()
+                json.dump(
+                    program_cache,
+                    program_cache_file.open('w'),
+                    indent=2
+                )
         # for i in range(self.actor_num):
         #     self.checkpoint_queue.put(STOP_SIGNAL)
         # self.eval_msg_val.value = STOP_SIGNAL.encode()
