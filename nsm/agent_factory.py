@@ -1155,7 +1155,8 @@ class PGAgent(nn.Module):
 
         return samples
 
-    def sample(self, environments, sample_num, use_cache=False):
+    def sample(self, environments, sample_num, use_cache=False,
+               constraint_sketches: Dict = None):
         if sample_num == 0:
             return []
 
@@ -1214,11 +1215,29 @@ class PGAgent(nn.Module):
                     completed_envs.append((env, sample_probs[env_id].item()))
                     has_completed_sample = True
                 else:
-                    # if the ob_t.valid_action_indices is empty, then the environment will terminate automatically,
-                    # so these is not need to check if this field is empty.
-                    observations_t.append(ob_t)
-                    new_active_env_pos.append(env_id)
-                    new_active_envs.append(env)
+                    if constraint_sketches is not None:
+                        # filtered_valid_action_ids = set()
+                        valid_sketches = constraint_sketches[env.name]
+                        for valid_action_id in list(env.valid_actions):
+                            action_token_t = env.de_vocab.lookup(valid_action_id, reverse=True)
+                            hyp_partial_program = env.program + [action_token_t]
+                            is_compatible = any(
+                                sketch.is_compatible_with_program(hyp_partial_program)
+                                for sketch
+                                in valid_sketches
+                            )
+
+                            if not is_compatible:
+                                ob_t.remove_action(valid_action_id)
+
+                    if ob_t.valid_action_indices:
+                        observations_t.append(ob_t)
+                        new_active_env_pos.append(env_id)
+                        new_active_envs.append(env)
+                    else:
+                        # force recomputing source context encodings since this environment
+                        # is finished
+                        has_completed_sample = True
 
             if not new_active_env_pos:
                 break

@@ -354,27 +354,6 @@ class Actor(torch_mp.Process):
                     try:
                         # print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}', file=sys.stderr)
                         # perform sampling
-                        t1 = time.time()
-                        if sample_method == 'sample':
-                            explore_samples = self.agent.sample(batched_envs,
-                                                                sample_num=config['n_explore_samples'],
-                                                                use_cache=config['use_cache'])
-                        else:
-                            explore_samples = self.agent.new_beam_search(batched_envs,
-                                                                         beam_size=config['n_explore_samples'],
-                                                                         use_cache=config['use_cache'],
-                                                                         return_list=True)
-                        t2 = time.time()
-                        print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, sampled {len(explore_samples)} trajectories (took {t2 - t1}s)', file=sys.stderr)
-
-                        # retain samples with high reward
-                        good_explore_samples = [sample for sample in explore_samples if sample.trajectory.reward == 1.]
-                        # for sample in good_explore_samples:
-                        #     print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, '
-                        #           f'add 1 traj [{sample.trajectory}] for env [{sample.trajectory.environment_name}] to buffer',
-                        #           file=sys.stderr)
-                        self.replay_buffer.save_samples(good_explore_samples)
-
                         if self.use_sketch_exploration:
                             constraint_sketches = dict()
                             num_sketches_per_example = config.get('num_candidate_sketches', 5)
@@ -427,39 +406,44 @@ class Actor(torch_mp.Process):
                                             f"{json.dumps(env_candidate_sketches, indent=2, default=str)}",
                                             file=debug_file
                                         )
+                        else:
+                            constraint_sketches = None
 
-                                t1 = time.time()
-                                sketch_explore_samples = self.agent.new_beam_search(
-                                    batched_envs,
-                                    beam_size=explore_beam_size,
-                                    use_cache=True,
-                                    return_list=True,
-                                    constraint_sketches=constraint_sketches,
-                                    strict_constraint_on_sketches=strict_constraint_on_sketches,
-                                    force_sketch_coverage=force_sketch_coverage
-                                )
-                                print(f'Perform sketch-constraint beam search took {time.time() - t1}s', file=debug_file)
+                        t1 = time.time()
+                        if sample_method == 'sample':
+                            explore_samples = self.agent.sample(
+                                batched_envs,
+                                sample_num=config['n_explore_samples'],
+                                use_cache=config['use_cache'],
+                                constraint_sketches=constraint_sketches
+                            )
+                        else:
+                            explore_samples = self.agent.new_beam_search(batched_envs,
+                                                                         beam_size=config['n_explore_samples'],
+                                                                         use_cache=config['use_cache'],
+                                                                         return_list=True)
+                        t2 = time.time()
 
-                                print('Explored programs:', file=debug_file)
-                                for sample in sketch_explore_samples:
-                                    print(f"[{sample.trajectory.environment_name}] "
-                                          f"{' '.join(sample.trajectory.program)} "
-                                          f"(prob={sample.prob:.4f}, correct={sample.trajectory.reward == 1.})", file=debug_file)
+                        print('Explored programs:', file=debug_file)
+                        for sample in explore_samples:
+                            print(f"[{sample.trajectory.environment_name}] "
+                                  f"{' '.join(sample.trajectory.program)} "
+                                  f"(prob={sample.prob:.4f}, correct={sample.trajectory.reward == 1.})",
+                                  file=debug_file)
 
-                                # retain samples with high reward
-                                good_explore_samples = [
-                                    sample
-                                    for sample
-                                    in sketch_explore_samples
-                                    if sample.trajectory.reward == 1.
-                                ]
+                        print(
+                            f'[Actor {self.actor_id}] '
+                            f'epoch {epoch_id} batch {batch_id}, '
+                            f'sampled {len(explore_samples)} trajectories (took {t2 - t1}s)', file=sys.stderr
+                        )
 
-                                if good_explore_samples:
-                                    print(
-                                        f'epoch {epoch_id} batch {batch_id}, '
-                                        f'sampled {len(good_explore_samples)} trajectories from '
-                                        f'sketch exploration', file=debug_file)
-                                    self.replay_buffer.save_samples(good_explore_samples)
+                        # retain samples with high reward
+                        good_explore_samples = [sample for sample in explore_samples if sample.trajectory.reward == 1.]
+                        # for sample in good_explore_samples:
+                        #     print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}, '
+                        #           f'add 1 traj [{sample.trajectory}] for env [{sample.trajectory.environment_name}] to buffer',
+                        #           file=sys.stderr)
+                        self.replay_buffer.save_samples(good_explore_samples)
 
                         # sample replay examples from the replay buffer
                         t1 = time.time()

@@ -40,6 +40,12 @@ class Observation(object):
                            self.output_features[:, t],
                            self.valid_action_mask[:, t])
 
+    def remove_action(self, action_id):
+        action_rel_id = self.valid_action_indices.index(action_id)
+        del self.valid_action_indices[action_rel_id]
+        if self.output_features:
+            del self.output_features[action_rel_id]
+
     @staticmethod
     def empty():
         """create an empty observation for padding"""
