@@ -1,5 +1,6 @@
 import math
 import random
+from typing import Tuple
 
 import torch
 import numpy as np
@@ -29,6 +30,27 @@ def glorot_init(params):
     for p in params:
         if len(p.data.size()) > 1:
             torch.nn.init.xavier_normal(p.data)
+
+
+def dot_prod_attention(
+    query: torch.Tensor,
+    keys: torch.Tensor,
+    values: torch.Tensor,
+    entry_masks: torch.Tensor = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    # (batch_size, src_sent_len)
+    att_weight = torch.bmm(keys, query.unsqueeze(2)).squeeze(2)
+
+    if entry_masks is not None:
+        att_weight.data.masked_fill_((1.0 - entry_masks).byte(), -float('inf'))
+
+    att_prob = torch.softmax(att_weight, dim=-1)
+
+    att_view = (att_weight.size(0), 1, att_weight.size(1))
+    # (batch_size, hidden_size)
+    ctx_vec = torch.bmm(att_prob.view(*att_view), values).squeeze(1)
+
+    return ctx_vec, att_prob
 
 
 def batch_iter(data, batch_size, shuffle=False):

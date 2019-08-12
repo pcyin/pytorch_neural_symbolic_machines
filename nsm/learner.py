@@ -27,6 +27,7 @@ import torch
 from tensorboardX import SummaryWriter
 
 from nsm.dist_util import STOP_SIGNAL
+from nsm.sketch.sketch_generator import TrainableSketchManager, SketchManagerTrainer
 
 
 class Learner(torch_mp.Process):
@@ -73,14 +74,16 @@ class Learner(torch_mp.Process):
         #         p.requires_grad = False
 
         no_grad = ['pooler']
-        param_optimizer = list([(p_name, p)
-                                for (p_name, p) in model.encoder.bert_model.named_parameters()
-                                if not any(pn in p_name for pn in no_grad)])
+        bert_params = [
+            (p_name, p)
+            for (p_name, p) in model.encoder.bert_model.named_parameters()
+            if not any(pn in p_name for pn in no_grad)
+        ]
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
         bert_grouped_parameters = [
-            {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)],
+            {'params': [p for n, p in bert_params if not any(nd in n for nd in no_decay)],
              'weight_decay': 0.01},
-            {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+            {'params': [p for n, p in bert_params if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
         num_train_optimization_steps = max_train_step
 
@@ -90,7 +93,12 @@ class Learner(torch_mp.Process):
             warmup=0.1,
             t_total=num_train_optimization_steps)
 
-        other_params = [p for n, p in model.named_parameters() if 'encoder.bert_model' not in n and p.requires_grad]
+        other_params = [
+            p
+            for n, p
+            in model.named_parameters()
+            if 'encoder.bert_model' not in n and 'sketch_manager' not in n and p.requires_grad
+        ]
         optimizer = torch.optim.Adam(other_params, lr=0.001)
         use_finetune = config['use_finetune']
 
@@ -123,6 +131,10 @@ class Learner(torch_mp.Process):
             nearest_neighbors = load_nearest_neighbors(config['nearest_neighbors_file'])
 
             retrainer = Retrainer(model, train_set, nearest_neighbors, config)
+
+        use_trainable_sketch_manager = model.sketch_manager is not None
+        if use_trainable_sketch_manager:
+            sketch_trainer = SketchManagerTrainer(model.sketch_manager, num_train_optimization_steps, config)
 
         max_batch_size = self.config['batch_size'] * (self.config['n_replay_samples'] + self.config['n_policy_samples'])
 
@@ -223,6 +235,9 @@ class Learner(torch_mp.Process):
                 model.load_state_dict(model_state)
 
                 model.train()
+
+            if use_trainable_sketch_manager:
+                sketch_trainer.step(train_trajectories, train_iter=train_iter)
 
             if train_iter % save_every_niter == 0:
                 print(f'[Learner] train_iter={train_iter} avg. loss={cum_loss / cum_examples}, '

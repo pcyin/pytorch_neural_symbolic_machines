@@ -24,6 +24,7 @@ from nsm.embedding import EmbeddingModel, Embedder
 from nsm.env_factory import Observation, Trajectory, QAProgrammingEnv, Sample
 
 # Sample = collections.namedtuple('Sample', ['trajectory', 'prob'])
+from nsm.sketch.sketch_generator import TrainableSketchManager
 from table.bert.model import TableBERT
 from table.bert.data_model import Example
 
@@ -965,7 +966,12 @@ class LSTMDecoder(nn.Module):
 class PGAgent(nn.Module):
     "Agent trained by policy gradient."
 
-    def __init__(self, encoder: EncoderBase, decoder: DecoderBase, config: Dict, discount_factor: float = 1.0):
+    def __init__(
+        self,
+        encoder: EncoderBase, decoder: DecoderBase,
+        sketch_manager: TrainableSketchManager,
+        config: Dict, discount_factor: float = 1.0
+    ):
         super(PGAgent, self).__init__()
 
         self.config = config
@@ -973,6 +979,7 @@ class PGAgent(nn.Module):
 
         self.encoder = encoder
         self.decoder = decoder
+        self.sketch_manager = sketch_manager
 
     @property
     def memory_size(self):
@@ -1602,7 +1609,14 @@ class PGAgent(nn.Module):
         encoder = BertEncoder.build(config)
         decoder = BertDecoder.build(config, encoder)
 
-        return PGAgent(encoder, decoder, config=config)
+        if config.get('use_trainable_sketch_manager', False):
+            sketch_manager = TrainableSketchManager.build(config)
+        else:
+            sketch_manager = None
+
+        return PGAgent(
+            encoder, decoder,
+            sketch_manager=sketch_manager, config=config)
 
     def save(self, model_path, kwargs=None):
         ddp = None

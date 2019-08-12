@@ -383,6 +383,7 @@ class Actor(torch_mp.Process):
                             strict_constraint_on_sketches = config.get('sketch_explore_strict_constraint_on_sketch', True)
                             force_sketch_coverage = config.get('sketch_explore_force_coverage', False)
                             use_sketch_exploration_for_nepoch = config.get('use_sketch_exploration_for_nepoch', 10000)
+                            use_trainable_sketch_manager = config.get('use_trainable_sketch_manager', False)
 
                             if epoch_id <= use_sketch_exploration_for_nepoch:
                                 t1 = time.time()
@@ -390,22 +391,27 @@ class Actor(torch_mp.Process):
                                     print("======", file=debug_file)
                                     print(f"Question [{env.name}] "
                                           f"{env.question_annotation['question']}", file=debug_file)
-                                    env_candidate_sketches = self.sketch_manager.get_sketches_from_similar_questions(
-                                        env.name,
-                                        remove_explored=remove_explored_sketch,
-                                        log_file=debug_file
-                                    )
+                                    if use_trainable_sketch_manager:
+                                        env_candidate_sketches = self.agent.sketch_manager.get_sketches(
+                                            question=env.context['question_tokens'])
+                                    else:
+                                        env_candidate_sketches = self.sketch_manager.get_sketches_from_similar_questions(
+                                            env.name,
+                                            remove_explored=remove_explored_sketch,
+                                            log_file=debug_file
+                                        )
 
-                                    print(f"Candidate sketches in the cache:\n"
-                                          f"{json.dumps({str(k): v for k, v in env_candidate_sketches.items()}, indent=2, default=str)}", file=debug_file)
+                                        print(f"Candidate sketches in the cache:\n"
+                                              f"{json.dumps({str(k): v for k, v in env_candidate_sketches.items()}, indent=2, default=str)}", file=debug_file)
 
-                                    env_selected_candidate_sketches = sorted(
-                                        env_candidate_sketches,
-                                        key=lambda s: env_candidate_sketches[s]['score'],
-                                        reverse=True)[:num_sketches_per_example]
+                                        env_candidate_sketches = sorted(
+                                            env_candidate_sketches,
+                                            key=lambda s: env_candidate_sketches[s]['score'],
+                                            reverse=True)[:num_sketches_per_example]
 
-                                    print(f"Selected sketches for [{env.name}]:\n{json.dumps(env_selected_candidate_sketches, indent=2, default=str)}", file=debug_file)
-                                    constraint_sketches[env.name] = env_selected_candidate_sketches
+                                    print(f"Selected sketches for [{env.name}]:\n{json.dumps(env_candidate_sketches, indent=2, default=str)}", file=debug_file)
+                                    constraint_sketches[env.name] = env_candidate_sketches
+
                                 print(f'Found candidate sketches took {time.time() - t1}s', file=debug_file)
 
                                 t1 = time.time()

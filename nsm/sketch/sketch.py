@@ -6,15 +6,21 @@ from nsm.program_cache import SharedProgramCache
 
 
 class Sketch(object):
-    def __init__(self, program):
-        self.tokens = Sketch.program_to_sketch(program)
+    def __init__(self, program=None, tokens=None):
+        if program:
+            self.tokens = Sketch.program_to_sketch(program)
+        else:
+            assert tokens
+            self.tokens = tokens
+
         self._sketch_str = ' '.join(self.tokens)
+        self.operators = self.get_operators(program)
 
     @staticmethod
     def program_to_sketch(program):
         sketch_tokens = []
         for token in program:
-            if token.startswith('v'):
+            if token.startswith('v') or token == 'all_rows':
                 token = 'v'
 
             sketch_tokens.append(token)
@@ -35,6 +41,23 @@ class Sketch(object):
 
     def __ne__(self, other):
         return not self.__eq__(other)
+
+    @staticmethod
+    def get_operators(program):
+        stack = []
+        for token in program:
+            if token == '(':
+                new_expr = []
+                stack.append(new_expr)
+            elif token == ')':
+                pass
+            elif token == '<END>':
+                pass
+            else:
+                stack[-1].append(token)
+
+        operators = [exp[0] for exp in stack]
+        return operators
 
     def is_compatible_with_hypothesis(self, hypothesis: Any):
         if hasattr(hypothesis, 'prev_hyp_env'):
