@@ -75,7 +75,7 @@ class Sketch(object):
     def is_compatible_with_program(self, program):
         is_compatible = True
         for p_token, s_token in zip(program, self.tokens):
-            if p_token.startswith('v'):
+            if p_token.startswith('v') or p_token == 'all_rows':
                 p_token = 'v'
 
             if p_token != s_token:

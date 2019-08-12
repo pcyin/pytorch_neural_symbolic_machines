@@ -280,34 +280,38 @@ class TrainableSketchManager(nn.Module):
 
         return att_ves
 
-    def get_sketches(self, question: List[Any], K=5):
-        return self._beam_search(question, beam_size=K)
+    def get_sketches(self, questions: List[Any], K=5):
+        return self._beam_search(questions, beam_size=K)
 
-    def _beam_search(self, question, beam_size: int, max_decoding_time_step: int = 6) -> List[Sketch]:
-        input_tensors = self.get_bert_input([question])
+    def _beam_search(self, questions, beam_size: int, max_decoding_time_step: int = 6) -> List[List[Sketch]]:
+        input_tensors = self.get_bert_input(questions)
         # (batch_size, sequence_len, encoding_size)
         src_encodings = self.encode(**input_tensors)
         src_encodings_att_linear = self.attention_value_to_key(src_encodings)
 
         # (batch_size, hidden_size)
-        att_tm1 = src_encodings.new_zeros(1, self.hidden_size)
-
         h_tm1 = self.decoder_init(src_encodings)
+        att_tm1 = src_encodings.new_zeros(len(questions), self.hidden_size)
 
-        hypotheses = [['<s>']]
-        hyp_scores = torch.zeros(len(hypotheses), dtype=torch.float, device=self.device)
-        completed_hypotheses = []
+        all_beams = [[['<s>']] for _ in questions]
+        completed_hypotheses = [[] for _ in questions]
+
+        hyp_question_ids = torch.tensor(list(range(len(questions))), dtype=torch.long, device=self.device)
+        hyp_scores = torch.zeros(len(questions), dtype=torch.float, device=self.device)
 
         t = 0
-        while len(completed_hypotheses) < beam_size and t < max_decoding_time_step:
+        while t < max_decoding_time_step:
             t += 1
-            hyp_num = len(hypotheses)
 
-            exp_src_encodings = src_encodings.expand(hyp_num, -1, -1)
-            exp_src_encodings_att_linear = src_encodings_att_linear.expand(hyp_num, -1, -1)
+            # (total_hyp_num, src_len, *)
+            exp_src_encodings = src_encodings.index_select(index=hyp_question_ids, dim=0)
+            exp_src_encodings_att_linear = src_encodings_att_linear.index_select(index=hyp_question_ids, dim=0)
+            exp_src_mask = input_tensors['attention_mask'].index_select(index=hyp_question_ids, dim=0)
 
             y_tm1 = torch.tensor(
-                [self.sketch_vocab[hyp[-1]] for hyp in hypotheses],
+                [self.sketch_vocab[hyp[-1]]
+                 for beam in all_beams
+                 for hyp in beam],
                 dtype=torch.long,
                 device=self.device)
             y_tm1_embed = self.sketch_token_embedding(y_tm1)
@@ -319,55 +323,78 @@ class TrainableSketchManager(nn.Module):
                 h_tm1,
                 exp_src_encodings,
                 exp_src_encodings_att_linear,
-                # input_tensors['attention_mask']
+                exp_src_mask
             )
 
+            # (total_hyp_num, vocab_size)
             log_p_t = torch.log_softmax(self.readout(att_t), dim=-1)
+            contiuating_hyp_candidate_scores = hyp_scores.unsqueeze(1).expand_as(log_p_t) + log_p_t
 
-            live_hyp_num = beam_size - len(completed_hypotheses)
-            contiuating_hyp_scores = (hyp_scores.unsqueeze(1).expand_as(log_p_t) + log_p_t).view(-1)
-            top_cand_hyp_scores, top_cand_hyp_pos = torch.topk(contiuating_hyp_scores, k=live_hyp_num)
-
-            prev_hyp_ids = top_cand_hyp_pos / len(self.sketch_vocab)
-            hyp_word_ids = top_cand_hyp_pos % len(self.sketch_vocab)
-
-            new_hypotheses = []
-            live_hyp_ids = []
+            # enumerate every beam
+            new_hyp_question_ids = []
             new_hyp_scores = []
+            new_hyp_prev_hyp_ids = []
+            new_beams = []
 
-            for prev_hyp_id, hyp_word_id, cand_new_hyp_score in zip(prev_hyp_ids, hyp_word_ids, top_cand_hyp_scores):
-                prev_hyp_id = prev_hyp_id.item()
-                hyp_word_id = hyp_word_id.item()
-                cand_new_hyp_score = cand_new_hyp_score.item()
+            beam_hyp_begin = 0
+            for q_idx, beam in enumerate(all_beams):
+                cur_beam_size = len(beam)
+                if cur_beam_size == 0:
+                    new_beams.append([])
+                    continue
 
-                hyp_word = self.sketch_id2token[hyp_word_id]
-                new_hyp_sent = hypotheses[prev_hyp_id] + [hyp_word]
-                if hyp_word == '</s>':
-                    if len(new_hyp_sent) > 2:  # <s> CONTENT </s>
-                        completed_hypotheses.append(Hypothesis(value=new_hyp_sent,
-                                                               score=cand_new_hyp_score))
-                else:
-                    new_hypotheses.append(new_hyp_sent)
-                    live_hyp_ids.append(prev_hyp_id)
-                    new_hyp_scores.append(cand_new_hyp_score)
+                beam_hyp_end = beam_hyp_begin + cur_beam_size
 
-            if len(completed_hypotheses) == beam_size:
+                # (cur_beam_size)
+                beam_contiuating_cand_scores = contiuating_hyp_candidate_scores[beam_hyp_begin: beam_hyp_end]
+                live_hyp_num = beam_size - len(completed_hypotheses[q_idx])
+
+                top_cand_hyp_scores, top_cand_hyp_pos = torch.topk(beam_contiuating_cand_scores.view(-1), k=live_hyp_num)
+                prev_hyp_ids = top_cand_hyp_pos / len(self.sketch_vocab)
+                hyp_word_ids = top_cand_hyp_pos % len(self.sketch_vocab)
+
+                new_beam = []
+                for prev_hyp_id, hyp_word_id, cand_new_hyp_score in zip(prev_hyp_ids, hyp_word_ids, top_cand_hyp_scores):
+                    prev_hyp_id = prev_hyp_id.item()
+                    hyp_word_id = hyp_word_id.item()
+                    cand_new_hyp_score = cand_new_hyp_score.item()
+
+                    hyp_word = self.sketch_id2token[hyp_word_id]
+                    new_hyp_sent = beam[prev_hyp_id] + [hyp_word]
+                    if hyp_word == '</s>':
+                        if len(new_hyp_sent) > 2:  # <s> CONTENT </s>
+                            completed_hypotheses[q_idx].append(
+                                Hypothesis(value=new_hyp_sent, score=cand_new_hyp_score))
+                    else:
+                        new_beam.append(new_hyp_sent)
+                        new_hyp_prev_hyp_ids.append(prev_hyp_id + beam_hyp_begin)
+                        new_hyp_question_ids.append(q_idx)
+                        new_hyp_scores.append(cand_new_hyp_score)
+
+                new_beams.append(new_beam)
+                beam_hyp_begin = beam_hyp_end
+
+            if all(len(beam) == 0 for beam in new_beams):
                 break
 
-            live_hyp_ids = torch.tensor(live_hyp_ids, dtype=torch.long, device=self.device)
-            h_tm1 = (h_t[live_hyp_ids], cell_t[live_hyp_ids])
-            att_tm1 = att_t[live_hyp_ids]
+            h_tm1 = (h_t[new_hyp_prev_hyp_ids], cell_t[new_hyp_prev_hyp_ids])
+            att_tm1 = att_t[new_hyp_prev_hyp_ids]
 
-            hypotheses = new_hypotheses
+            all_beams = new_beams
             hyp_scores = torch.tensor(new_hyp_scores, dtype=torch.float, device=self.device)
+            hyp_question_ids = torch.tensor(new_hyp_question_ids, dtype=torch.long, device=self.device)
 
-        completed_hypotheses.sort(key=lambda hyp: hyp.score, reverse=True)
+        sketches = []
+        for hyps in completed_hypotheses:
+            hyps.sort(key=lambda hyp: hyp.score, reverse=True)
 
-        sketches = [
-            self.hypothesis_to_sketch(hyp)
-            for hyp
-            in completed_hypotheses
-        ]
+            question_sketches = [
+                self.hypothesis_to_sketch(hyp)
+                for hyp
+                in hyps
+            ]
+
+            sketches.append(question_sketches)
 
         return sketches
 

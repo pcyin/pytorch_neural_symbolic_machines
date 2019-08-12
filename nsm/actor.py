@@ -387,21 +387,23 @@ class Actor(torch_mp.Process):
 
                             if epoch_id <= use_sketch_exploration_for_nepoch:
                                 t1 = time.time()
-                                for env in batched_envs:
-                                    print("======", file=debug_file)
-                                    print(f"Question [{env.name}] "
-                                          f"{env.question_annotation['question']}", file=debug_file)
-                                    if use_trainable_sketch_manager:
-                                        env_candidate_sketches = self.agent.sketch_manager.get_sketches(
-                                            question=env.context['question_tokens'])
-                                    else:
+                                if use_trainable_sketch_manager:
+                                    batched_questions = [env.context['question_tokens'] for env in batched_envs]
+                                    candidate_sketches = self.agent.sketch_manager.get_sketches(
+                                        batched_questions,
+                                        K=num_sketches_per_example
+                                    )
+                                    for env, sketches in zip(batched_envs, candidate_sketches):
+                                        constraint_sketches[env.name] = sketches
+                                else:
+                                    for env in batched_envs:
                                         env_candidate_sketches = self.sketch_manager.get_sketches_from_similar_questions(
                                             env.name,
                                             remove_explored=remove_explored_sketch,
-                                            log_file=debug_file
+                                            log_file=None
                                         )
 
-                                        print(f"Candidate sketches in the cache:\n"
+                                        print(f"Question {env.name} Candidate sketches in the cache:\n"
                                               f"{json.dumps({str(k): v for k, v in env_candidate_sketches.items()}, indent=2, default=str)}", file=debug_file)
 
                                         env_candidate_sketches = sorted(
@@ -409,10 +411,22 @@ class Actor(torch_mp.Process):
                                             key=lambda s: env_candidate_sketches[s]['score'],
                                             reverse=True)[:num_sketches_per_example]
 
-                                    print(f"Selected sketches for [{env.name}]:\n{json.dumps(env_candidate_sketches, indent=2, default=str)}", file=debug_file)
                                     constraint_sketches[env.name] = env_candidate_sketches
 
+                                # logging
                                 print(f'Found candidate sketches took {time.time() - t1}s', file=debug_file)
+                                if debug_file:
+                                    for env in batched_envs:
+                                        print("======", file=debug_file)
+                                        print(f"Question [{env.name}] "
+                                              f"{env.question_annotation['question']}", file=debug_file)
+
+                                        env_candidate_sketches = constraint_sketches[env.name]
+                                        print(
+                                            f"Selected sketches for [{env.name}]:\n"
+                                            f"{json.dumps(env_candidate_sketches, indent=2, default=str)}",
+                                            file=debug_file
+                                        )
 
                                 t1 = time.time()
                                 sketch_explore_samples = self.agent.new_beam_search(
