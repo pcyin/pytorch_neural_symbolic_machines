@@ -86,6 +86,20 @@ class TrainableSketchManager(nn.Module):
 
         self.dropout = nn.Dropout(0.2)
 
+        self.init_weights()
+
+    def init_weights(self):
+        def _init_weights(module):
+            if isinstance(module, (nn.Linear, nn.Embedding)):
+                module.weight.data.normal_(mean=0.0, std=self.bert_model.config.initializer_range)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                module.bias.data.zero_()
+
+        for m_name, module in self.named_modules():
+            if 'bert_model' not in m_name:
+                module.apply(_init_weights)
+
+
     @property
     def device(self):
         return next(self.parameters()).device
