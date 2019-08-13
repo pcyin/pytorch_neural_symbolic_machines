@@ -490,4 +490,4 @@ class SketchManagerTrainer(object):
         if train_iter > self.freeze_bert_for_niter:
             self.bert_optimizer.step()
         elif train_iter == self.freeze_bert_for_niter:
-            optimizer = torch.optim.Adam(self.other_params, lr=0.001)
+            self.optimizer = torch.optim.Adam(self.other_params, lr=0.001)
