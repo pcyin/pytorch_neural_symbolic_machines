@@ -408,6 +408,7 @@ class Actor(torch_mp.Process):
                                         )
                         else:
                             constraint_sketches = None
+                            strict_constraint_on_sketches = force_sketch_coverage = False
 
                         t1 = time.time()
                         if sample_method == 'sample':
@@ -418,10 +419,15 @@ class Actor(torch_mp.Process):
                                 constraint_sketches=constraint_sketches
                             )
                         else:
-                            explore_samples = self.agent.new_beam_search(batched_envs,
-                                                                         beam_size=config['n_explore_samples'],
-                                                                         use_cache=config['use_cache'],
-                                                                         return_list=True)
+                            explore_samples = self.agent.new_beam_search(
+                                batched_envs,
+                                beam_size=config['n_explore_samples'],
+                                use_cache=config['use_cache'],
+                                return_list=True,
+                                constraint_sketches=constraint_sketches,
+                                strict_constraint_on_sketches=strict_constraint_on_sketches,
+                                force_sketch_coverage=force_sketch_coverage
+                            )
                         t2 = time.time()
 
                         print('Explored programs:', file=debug_file)
