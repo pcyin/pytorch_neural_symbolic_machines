@@ -1597,11 +1597,38 @@ class PGAgent(nn.Module):
 
     def decode_examples(self, environments: List[QAProgrammingEnv], beam_size, batch_size=32):
         decode_results = []
+        use_sketch_constrained_decoding = self.config.get('use_sketch_constrained_decoding', False)
+
+        if use_sketch_constrained_decoding:
+            assert self.sketch_manager is not None
+            print('[Model] use sketch-constrained decoding...', file=sys.stderr)
+            num_sketch = self.config.get('sketch_constrained_decoding_num_sketch', 5)
 
         with torch.no_grad():
             batch_iter = nn_util.batch_iter(environments, batch_size, shuffle=False)
             for batched_envs in tqdm(batch_iter, total=len(environments) // batch_size, file=sys.stdout):
-                batch_decode_result = self.new_beam_search(batched_envs, beam_size=beam_size)
+                if use_sketch_constrained_decoding:
+                    batched_hyp_sketches = self.sketch_manager.get_sketches(
+                        [
+                            env.context['question_tokens']
+                            for env in batched_envs
+                        ],
+                        K=num_sketch
+                    )
+                    constraint_sketches = {
+                        env.name: sketches
+                        for env, sketches
+                        in zip(batched_envs, batched_hyp_sketches)
+                    }
+                else:
+                    constraint_sketches = None
+
+                batch_decode_result = self.new_beam_search(
+                    batched_envs,
+                    beam_size=beam_size,
+                    constraint_sketches=constraint_sketches,
+                    strict_constraint_on_sketches=use_sketch_constrained_decoding
+                )
 
                 batch_decode_result = list(batch_decode_result.values())
                 decode_results.extend(batch_decode_result)
