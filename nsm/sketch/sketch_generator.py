@@ -430,7 +430,7 @@ class TrainableSketchManager(nn.Module):
 
 
 class SketchManagerTrainer(object):
-    def __init__(self, model: TrainableSketchManager, num_train_step: int, config: Dict):
+    def __init__(self, model: TrainableSketchManager, num_train_step: int, freeze_bert_for_niter: int, config: Dict):
         self.model = model
 
         no_grad = ['pooler']
@@ -461,6 +461,8 @@ class SketchManagerTrainer(object):
             self.other_params,
             lr=0.001)
 
+        self.freeze_bert_for_niter = freeze_bert_for_niter
+
     def step(self, trajectories: List[Trajectory], train_iter: int):
         questions = [
             traj.context['question_tokens']
@@ -483,5 +485,9 @@ class SketchManagerTrainer(object):
             print(f'[SketchManagerTrainer] loss={sketch_loss.item()}', file=sys.stderr)
 
         torch.nn.utils.clip_grad_norm_(self.other_params, 5.)
-        self.bert_optimizer.step()
+
         self.optimizer.step()
+        if train_iter > self.freeze_bert_for_niter:
+            self.bert_optimizer.step()
+        elif train_iter == self.freeze_bert_for_niter:
+            optimizer = torch.optim.Adam(self.other_params, lr=0.001)

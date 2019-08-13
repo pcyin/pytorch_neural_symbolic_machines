@@ -134,7 +134,12 @@ class Learner(torch_mp.Process):
 
         use_trainable_sketch_manager = model.sketch_manager is not None
         if use_trainable_sketch_manager:
-            sketch_trainer = SketchManagerTrainer(model.sketch_manager, num_train_optimization_steps, config)
+            sketch_trainer = SketchManagerTrainer(
+                model.sketch_manager,
+                num_train_optimization_steps,
+                freeze_bert_for_niter=freeze_bert_for_niter,
+                config=config
+            )
 
         max_batch_size = self.config['batch_size'] * (self.config['n_replay_samples'] + self.config['n_policy_samples'])
 
