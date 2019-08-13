@@ -99,7 +99,6 @@ class TrainableSketchManager(nn.Module):
             if 'bert_model' not in m_name:
                 module.apply(_init_weights)
 
-
     @property
     def device(self):
         return next(self.parameters()).device
@@ -425,7 +424,7 @@ class TrainableSketchManager(nn.Module):
             else:
                 raise ValueError(f'Unknown token {token}')
 
-        sketch = Sketch(sketch_tokens)
+        sketch = Sketch(sketch_tokens, prob=float(hyp.score))
 
         return sketch
 

@@ -6,7 +6,7 @@ from nsm.program_cache import SharedProgramCache
 
 
 class Sketch(object):
-    def __init__(self, program=None, tokens=None):
+    def __init__(self, program=None, tokens=None, prob=None):
         if program:
             self.tokens = Sketch.program_to_sketch(program)
         else:
@@ -14,7 +14,11 @@ class Sketch(object):
             self.tokens = tokens
 
         self._sketch_str = ' '.join(self.tokens)
+        if prob is not None:
+            self._sketch_str += f' (prob={prob})'
+
         self.operators = self.get_operators(program)
+        self.prob = prob
 
     @staticmethod
     def program_to_sketch(program):
