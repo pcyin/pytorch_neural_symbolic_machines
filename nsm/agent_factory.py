@@ -1155,8 +1155,10 @@ class PGAgent(nn.Module):
 
         return samples
 
-    def sample(self, environments, sample_num, use_cache=False,
-               constraint_sketches: Dict = None):
+    def sample(
+        self, environments, sample_num, use_cache=False,
+        constraint_sketches: Dict = None,
+    ):
         if sample_num == 0:
             return []
 
@@ -1273,6 +1275,9 @@ class PGAgent(nn.Module):
         if use_cache:
             # if already explored everything, then don't explore this environment anymore.
             environments = [env for env in environments if not env.cache.is_full()]
+
+        for env in environments:
+            env.use_cache = use_cache
 
         CandidateHyp = collections.namedtuple('CandidateHyp',
                                               ['prev_hyp_env', 'action_id', 'rel_action_id', 'score', 'prev_hyp_abs_pos'])
