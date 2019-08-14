@@ -11,7 +11,7 @@ import numpy as np
 from pytorch_pretrained_bert import BertTokenizer
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel, BertConfig, BertForMaskedLM, BertForPreTraining
 from pytorch_pretrained_bert import BertAdam
-from typing import List, Tuple, Any, Dict
+from typing import List, Tuple, Any, Dict, Optional
 
 from nsm import nn_util
 from nsm.env_factory import Environment, Trajectory
@@ -40,18 +40,36 @@ class TrainableSketchManager(nn.Module):
         self,
         bert_model: BertPreTrainedModel,
         tokenizer: BertTokenizer,
-        hidden_size: int
+        hidden_size: int,
+        token_embed_size: int,
+        only_use_bert_encoding: bool = False,
+        use_lstm_encoder: bool = False,
+        dropout: float = 0.2
     ):
         nn.Module.__init__(self)
 
         self.bert_model = bert_model
         self.tokenizer = tokenizer
-        self.src_encoding_size = bert_model.config.hidden_size
         self.hidden_size = hidden_size
+        self.only_use_bert_encoding = only_use_bert_encoding
+        self.use_lstm_encoder = use_lstm_encoder
+
+        if only_use_bert_encoding:
+            for param in bert_model.parameters():
+                param.requires_grad = False
+
+        if use_lstm_encoder:
+            self.lstm_encoder = nn.LSTM(
+                bert_model.config.hidden_size, hidden_size,
+                bidirectional=True, batch_first=True
+            )
+
+            self.src_encoding_size = hidden_size * 2
+        else:
+            self.src_encoding_size = bert_model.config.hidden_size
 
         self.attention_value_to_key = nn.Linear(self.src_encoding_size, hidden_size, bias=False)
 
-        token_embed_size = hidden_size
         self.decoder_lstm = nn.LSTMCell(
             hidden_size + token_embed_size,
             hidden_size
@@ -84,7 +102,7 @@ class TrainableSketchManager(nn.Module):
             bias=False
         )
 
-        self.dropout = nn.Dropout(0.2)
+        self.dropout = nn.Dropout(dropout)
 
         self.init_weights()
 
@@ -112,7 +130,10 @@ class TrainableSketchManager(nn.Module):
         model = cls(
             bert_model,
             BertTokenizer.from_pretrained(params['bert_model']),
-            params['sketch_decoder_hidden_size'],
+            hidden_size=params['sketch_decoder_hidden_size'],
+            token_embed_size=params['sketch_decoder_token_embed_size'],
+            only_use_bert_encoding=params['sketch_decoder_only_use_bert_encoding'],
+            use_lstm_encoder=params['sketch_decoder_use_lstm_encoder']
         )
 
         return model
@@ -121,7 +142,10 @@ class TrainableSketchManager(nn.Module):
     def default_params(cls):
         return {
             'bert_model': 'bert-base-uncased',
-            'sketch_decoder_hidden_size': 256
+            'sketch_decoder_hidden_size': 256,
+            'sketch_decoder_token_embed_size': 256,
+            'sketch_decoder_only_use_bert_encoding': False,
+            'sketch_decoder_use_lstm_encoder': False
         }
 
     def step(
@@ -207,9 +231,7 @@ class TrainableSketchManager(nn.Module):
         tensor_dict = self.to_tensor_dict(examples, sketches)
 
         # (batch_size, sequence_len, encoding_size)
-        src_encodings = self.encode(**tensor_dict['bert_input'])
-
-        decoder_init_vec = self.decoder_init(src_encodings)
+        src_encodings, decoder_init_vec = self.encode(**tensor_dict['bert_input'])
 
         tgt_sketch_token_ids = tensor_dict['tgt_sketch_token_ids']
 
@@ -239,19 +261,58 @@ class TrainableSketchManager(nn.Module):
         return sketch_prob
 
     def encode(self, input_ids, segment_ids, attention_mask):
-        sequence_output, _ = self.bert_model(
+        bert_sequence_output, _ = self.bert_model(
             input_ids,
             segment_ids,
             attention_mask,
             output_all_encoded_layers=False
         )
 
-        return sequence_output
+        if self.use_lstm_encoder:
+            src_lens = [
+                int(l)
+                for l
+                in attention_mask.sum(-1).cpu().tolist()
+            ]
+            packed_input = pack_padded_sequence(
+                bert_sequence_output, src_lens,
+                batch_first=True, enforce_sorted=False
+            )
 
-    def decoder_init(self, src_encodings: torch.Tensor) -> torch.Tensor:
-        cell_0 = self.decoder_init_linear(
-            src_encodings[:, 0])
+            src_encodings, (sorted_last_state, sorted_last_cell) = self.lstm_encoder(packed_input)
+            src_encodings, _ = pad_packed_sequence(src_encodings, batch_first=True)
 
+            # (num_directions, batch_size, hidden_size)
+            last_cell = sorted_last_cell.index_select(1, packed_input.unsorted_indices)
+            # (batch_size, num_directions * hidden_size)
+            last_states = torch.cat([last_cell[0], last_cell[1]], dim=-1)
+
+            # size = list(src_encodings.size())[:-1] + [2, -1]
+            # # (batch_size, sequence_len, num_directions, hidden_size)
+            # src_encodings_directional = src_encodings.view(*size)
+            #
+            # # (batch_size, sequence_len, hidden_size)
+            # fwd_encodings = src_encodings_directional[:, :, 0, :]
+            # bak_encoding = src_encodings_directional[:, :, 1, :]
+            #
+            # fwd_last_state = fwd_encodings[:, [l - 1 for l in src_lens], :]
+            # bak_last_state = bak_encoding[:, 0, :]
+            #
+            # last_states = torch.cat([fwd_last_state, bak_last_state], dim=-1)
+        else:
+            src_encodings = bert_sequence_output
+            last_states = bert_sequence_output[:, 0]
+
+        decoder_init_state = self.decoder_init(src_encodings, last_states)
+
+        return src_encodings, decoder_init_state
+
+    def decoder_init(
+        self,
+        src_encodings: torch.Tensor,
+        last_states: Optional[Any]
+    ) -> torch.Tensor:
+        cell_0 = self.decoder_init_linear(last_states)
         state_0 = torch.tanh(cell_0)
 
         return [state_0, cell_0]
@@ -299,11 +360,10 @@ class TrainableSketchManager(nn.Module):
     def _beam_search(self, questions, beam_size: int, max_decoding_time_step: int = 6) -> List[List[Sketch]]:
         input_tensors = self.get_bert_input(questions)
         # (batch_size, sequence_len, encoding_size)
-        src_encodings = self.encode(**input_tensors)
+        src_encodings, h_tm1 = self.encode(**input_tensors)
         src_encodings_att_linear = self.attention_value_to_key(src_encodings)
 
         # (batch_size, hidden_size)
-        h_tm1 = self.decoder_init(src_encodings)
         att_tm1 = src_encodings.new_zeros(len(questions), self.hidden_size)
 
         all_beams = [[['<s>']] for _ in questions]
@@ -437,12 +497,14 @@ class SketchManagerTrainer(object):
         bert_params = list([
             (p_name, p)
             for (p_name, p) in model.bert_model.named_parameters()
-            if not any(pn in p_name for pn in no_grad)])
+            if not any(pn in p_name for pn in no_grad) and p.requires_grad])
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
         bert_grouped_parameters = [
             {'params': [p for n, p in bert_params if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
             {'params': [p for n, p in bert_params if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
+
+        # print(bert_grouped_parameters)
 
         self.other_params = [
             p
