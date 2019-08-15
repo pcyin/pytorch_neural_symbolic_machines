@@ -212,16 +212,26 @@ class BertEncoder(EncoderBase):
             [Example(question=e['question_tokens'], table=e['table']) for e in env_context]
         )
 
-        question_encoding = question_encoding[:, 1:]
-        cls_encoding = question_encoding[:, 0]
-        info['cls_encoding'] = cls_encoding
+        table_bert_encoding = {
+            'question_encoding': question_encoding,
+            'column_encoding': table_column_encoding,
+        }
+        table_bert_encoding.update(info['tensor_dict'])
 
-        return question_encoding, table_column_encoding, info
+        return table_bert_encoding
 
     def encode(self, env_context: List[Dict]) -> ContextEncoding:
         batched_context = self.example_list_to_batch(env_context)
 
-        question_encoding, table_column_encoding, info = self._bert_encode(env_context)
+        table_bert_encoding = self._bert_encode(env_context)
+
+        # remove leading [CLS] symbol
+        question_encoding = table_bert_encoding['question_encoding'][:, 1:]
+        question_mask = table_bert_encoding['question_token_mask'][:, 1:]
+        cls_encoding = table_bert_encoding['question_encoding'][:, 0]
+
+        table_column_encoding = table_bert_encoding['column_encoding']
+        table_column_mask = table_bert_encoding['column_mask']
 
         if self.question_feat_size > 0:
             question_encoding = torch.cat([
@@ -275,7 +285,7 @@ class BertEncoder(EncoderBase):
 
         # (batch_size, max_column_num, encoding_size)
         table_column_encoding = self.bert_table_output_project(table_column_encoding)
-        table_column_mask = info['tensor_dict']['column_mask']
+        # table_column_mask = info['tensor_dict']['column_mask']
 
         if max_column_num < constant_value_num:
             constant_value_embedding = torch.cat([
@@ -291,11 +301,12 @@ class BertEncoder(EncoderBase):
             'question_encoding': question_encoding,
             'column_encoding': table_column_encoding,
             'column_mask': table_column_mask,
-            'cls_encoding': info['cls_encoding'],
-            'question_mask': info['tensor_dict']['question_token_mask'][:, 1:],  # remove leading [CLS] symbol
+            'cls_encoding': cls_encoding,
+            'question_mask': question_mask,
             'question_encoding_att_linear': question_encoding_att_linear,
             'constant_value_embeddings': constant_value_embedding,
-            'constant_spans': batched_context['constant_spans']
+            'constant_spans': batched_context['constant_spans'],
+            'table_bert_encoding': table_bert_encoding
         }
 
         return context_encoding

@@ -160,6 +160,7 @@ class Learner(torch_mp.Process):
             batch_log_prob = batch_log_prob * train_sample_weights
 
             loss = -batch_log_prob.mean()
+            summary_writer.add_scalar('parser_loss', loss.item(), train_iter)
             # loss = -batch_log_prob.sum() / max_batch_size
 
             if entropy_reg_weight != 0.:
@@ -171,10 +172,14 @@ class Learner(torch_mp.Process):
                 summary_writer.add_scalar('entropy_reg_loss', ent_reg_loss.item(), train_iter)
 
             if use_trainable_sketch_manager:
-                sketch_loss = model.sketch_manager.get_trajectory_sketch_loss(
+                sketch_log_prob = model.sketch_manager.get_trajectory_sketch_prob(
                     train_trajectories,
-                    context_encoding=meta_info['context_encoding']
+                    context_encoding=meta_info['context_encoding']['table_bert_encoding']
                 )
+
+                sketch_loss = -(sketch_log_prob * train_sample_weights).mean()
+                summary_writer.add_scalar('sketch_loss', sketch_loss.item(), train_iter)
+
                 loss = loss + sketch_loss
 
             loss.backward()
@@ -197,7 +202,6 @@ class Learner(torch_mp.Process):
             del loss
             if entropy_reg_weight != 0.: del entropy
 
-            summary_writer.add_scalar('train_loss', loss_val, train_iter)
             if 'clip_frac' in samples_info:
                 summary_writer.add_scalar('sample_clip_frac', samples_info['clip_frac'], train_iter)
 
