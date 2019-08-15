@@ -275,6 +275,7 @@ class BertEncoder(EncoderBase):
 
         # (batch_size, max_column_num, encoding_size)
         table_column_encoding = self.bert_table_output_project(table_column_encoding)
+        table_column_mask = info['tensor_dict']['column_mask']
 
         if max_column_num < constant_value_num:
             constant_value_embedding = torch.cat([
@@ -288,8 +289,10 @@ class BertEncoder(EncoderBase):
         context_encoding = {
             'batch_size': len(env_context),
             'question_encoding': question_encoding,
+            'column_encoding': table_column_encoding,
+            'column_mask': table_column_mask,
             'cls_encoding': info['cls_encoding'],
-            'question_mask': info['tensor_dict']['question_token_mask'][:, 1:],  # remove learning [CLS] symbol
+            'question_mask': info['tensor_dict']['question_token_mask'][:, 1:],  # remove leading [CLS] symbol
             'question_encoding_att_linear': question_encoding_att_linear,
             'constant_value_embeddings': constant_value_embedding,
             'constant_spans': batched_context['constant_spans']
@@ -1036,7 +1039,8 @@ class PGAgent(nn.Module):
                 tgt_action_id=tgt_action_id,
                 tgt_action_mask=tgt_action_mask,
                 action_logits=action_logits,
-                valid_action_mask=batched_observation_seq.valid_action_mask
+                valid_action_mask=batched_observation_seq.valid_action_mask,
+                context_encoding=context_encoding
             )
 
             return tgt_action_log_probs, info
@@ -1052,7 +1056,7 @@ class PGAgent(nn.Module):
 
             return traj_log_prob.tolist()
 
-    def forward(self, trajectories: List[Trajectory], entropy=False):
+    def forward(self, trajectories: List[Trajectory], entropy=False, return_info=False):
         # (batch_size, max_action_len)
         tgt_action_log_probs, meta_info = self.compute_trajectory_actions_prob(trajectories, return_info=True)
 
@@ -1085,6 +1089,9 @@ class PGAgent(nn.Module):
             H = torch.sum(H, dim=-1).sum(dim=-1) / tgt_action_mask.sum(-1)
 
             return traj_log_prob, H
+
+        if return_info:
+            return traj_log_prob, meta_info
 
         return traj_log_prob
 
@@ -1661,7 +1668,7 @@ class PGAgent(nn.Module):
         decoder = BertDecoder.build(config, encoder)
 
         if config.get('use_trainable_sketch_manager', False):
-            sketch_manager = TrainableSketchManager.build(config)
+            sketch_manager = TrainableSketchManager.build(config, encoder=encoder)
         else:
             sketch_manager = None
 

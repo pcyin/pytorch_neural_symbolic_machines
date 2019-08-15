@@ -367,9 +367,8 @@ class Actor(torch_mp.Process):
                             if epoch_id <= use_sketch_exploration_for_nepoch:
                                 t1 = time.time()
                                 if use_trainable_sketch_manager:
-                                    batched_questions = [env.context['question_tokens'] for env in batched_envs]
                                     candidate_sketches = self.agent.sketch_manager.get_sketches(
-                                        batched_questions,
+                                        batched_envs,
                                         K=num_sketches_per_example
                                     )
                                     for env, sketches in zip(batched_envs, candidate_sketches):

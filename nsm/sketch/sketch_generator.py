@@ -9,14 +9,16 @@ import numpy as np
 
 
 from pytorch_pretrained_bert import BertTokenizer
-from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel, BertConfig, BertForMaskedLM, BertForPreTraining
+from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel, BertConfig, BertForMaskedLM, \
+    BertForPreTraining
 from pytorch_pretrained_bert import BertAdam
-from typing import List, Tuple, Any, Dict, Optional
+from typing import List, Tuple, Any, Dict, Optional, Union
 
 from nsm import nn_util
 from nsm.env_factory import Environment, Trajectory
 from nsm.executor_factory import SimpleKGExecutor, TableExecutor
 from nsm.sketch.sketch import Sketch
+from table.bert.model import TableBERT
 
 Hypothesis = namedtuple('Hypothesis', ['value', 'score'])
 
@@ -38,7 +40,7 @@ def get_executor_api():
 class TrainableSketchManager(nn.Module):
     def __init__(
         self,
-        bert_model: BertPreTrainedModel,
+        encoder_model: Any,
         tokenizer: BertTokenizer,
         hidden_size: int,
         token_embed_size: int,
@@ -48,25 +50,31 @@ class TrainableSketchManager(nn.Module):
     ):
         nn.Module.__init__(self)
 
-        self.bert_model = bert_model
+        self.encoder_model = encoder_model
         self.tokenizer = tokenizer
         self.hidden_size = hidden_size
         self.only_use_bert_encoding = only_use_bert_encoding
         self.use_lstm_encoder = use_lstm_encoder
 
+        self.use_agent_encoder = hasattr(encoder_model, 'bert_model')
+
         if only_use_bert_encoding:
-            for param in bert_model.parameters():
+            for param in encoder_model.parameters():
                 param.requires_grad = False
+
+        bert_output_size = encoder_model.output_size \
+            if self.use_agent_encoder \
+            else encoder_model.config.hidden_size
 
         if use_lstm_encoder:
             self.lstm_encoder = nn.LSTM(
-                bert_model.config.hidden_size, hidden_size,
+                bert_output_size, hidden_size,
                 bidirectional=True, batch_first=True
             )
 
             self.src_encoding_size = hidden_size * 2
         else:
-            self.src_encoding_size = bert_model.config.hidden_size
+            self.src_encoding_size = bert_output_size
 
         self.attention_value_to_key = nn.Linear(self.src_encoding_size, hidden_size, bias=False)
 
@@ -75,6 +83,10 @@ class TrainableSketchManager(nn.Module):
             hidden_size
         )
         self.att_vec_linear = nn.Linear(hidden_size + self.src_encoding_size, self.hidden_size, bias=False)
+
+        if self.use_agent_encoder:
+            assert hidden_size == bert_output_size
+            self.combine_context_vectors = nn.Linear(self.encoder_model.output_size * 2, self.src_encoding_size)
 
         self.executor_api = get_executor_api()
         operators = sorted(self.executor_api['func_dict'])
@@ -94,7 +106,10 @@ class TrainableSketchManager(nn.Module):
             token_embed_size
         )
 
-        self.decoder_init_linear = nn.Linear(self.src_encoding_size, self.hidden_size)
+        self.decoder_init_linear = nn.Linear(
+            self.encoder_model.bert_model.output_size if self.use_agent_encoder else self.src_encoding_size,
+            self.hidden_size
+        )
 
         self.readout = nn.Linear(
             hidden_size,
@@ -108,13 +123,17 @@ class TrainableSketchManager(nn.Module):
 
     def init_weights(self):
         def _init_weights(module):
+            initializer_range = self.encoder_model.bert_model.config.initializer_range \
+                if self.use_agent_encoder \
+                else self.encoder_model.config.initializer_range
+
             if isinstance(module, (nn.Linear, nn.Embedding)):
-                module.weight.data.normal_(mean=0.0, std=self.bert_model.config.initializer_range)
+                module.weight.data.normal_(mean=0.0, std=initializer_range)
             if isinstance(module, nn.Linear) and module.bias is not None:
                 module.bias.data.zero_()
 
         for m_name, module in self.named_modules():
-            if 'bert_model' not in m_name:
+            if 'encoder_model' not in m_name:
                 module.apply(_init_weights)
 
     @property
@@ -122,14 +141,20 @@ class TrainableSketchManager(nn.Module):
         return next(self.parameters()).device
 
     @classmethod
-    def build(cls, config):
+    def build(cls, config, **kwargs):
         params = cls.default_params()
         params.update(config)
 
-        bert_model = BertModel.from_pretrained(params['bert_model'])
+        if params['sketch_decoder_use_parser_encoder']:
+            encoder_model = kwargs['encoder']
+            tokenizer = encoder_model.bert_model.tokenizer
+        else:
+            encoder_model = BertModel.from_pretrained(params['bert_model'])
+            tokenizer = BertTokenizer.from_pretrained(params['bert_model'])
+
         model = cls(
-            bert_model,
-            BertTokenizer.from_pretrained(params['bert_model']),
+            encoder_model,
+            tokenizer,
             hidden_size=params['sketch_decoder_hidden_size'],
             token_embed_size=params['sketch_decoder_token_embed_size'],
             only_use_bert_encoding=params['sketch_decoder_only_use_bert_encoding'],
@@ -141,6 +166,7 @@ class TrainableSketchManager(nn.Module):
     @classmethod
     def default_params(cls):
         return {
+            'sketch_decoder_use_parser_encoder': False,
             'bert_model': 'bert-base-uncased',
             'sketch_decoder_hidden_size': 256,
             'sketch_decoder_token_embed_size': 256,
@@ -151,19 +177,32 @@ class TrainableSketchManager(nn.Module):
     def step(
         self, x: torch.Tensor,
         h_tm1: Tuple[torch.Tensor, torch.Tensor],
-        att_values: torch.Tensor,
-        att_keys: torch.Tensor,
-        att_masks: torch.Tensor = None) -> Tuple[Tuple, torch.Tensor]:
+        src_encodings: Dict,
+        column_encodings: Dict
+    ) -> Tuple[Tuple, torch.Tensor]:
 
         # h_t: (batch_size, hidden_size)
         h_t, cell_t = self.decoder_lstm(x, h_tm1)
 
-        ctx_t, alpha_t = nn_util.dot_prod_attention(
+        # (batch_size, question_len, encoding_size)
+        ctx_q_t, alpha_q_t = nn_util.dot_prod_attention(
             query=h_t,
-            keys=att_keys,
-            values=att_values,
-            entry_masks=att_masks
+            keys=src_encodings['key'],
+            values=src_encodings['value'],
+            entry_masks=src_encodings['mask']
         )
+
+        # (batch_size, column_num, encoding_size)
+        ctx_column_t, alpha_column_t = nn_util.dot_prod_attention(
+            query=h_t,
+            keys=column_encodings['key'],
+            values=column_encodings['value'],
+            entry_masks=column_encodings['mask']
+        )
+
+        # (batch_size, context_vector_size)
+        ctx_t = torch.tanh(self.combine_context_vectors(
+            torch.cat([ctx_q_t, ctx_column_t], dim=-1)))
 
         att_t = torch.tanh(self.att_vec_linear(torch.cat([h_t, ctx_t], 1)))
         att_t = self.dropout(att_t)
@@ -196,50 +235,74 @@ class TrainableSketchManager(nn.Module):
 
         return bert_input
 
-    def to_tensor_dict(self, examples: List[Any], sketches: List[Sketch]):
+    def to_tensor_dict(self, examples: List[Any], sketches: List[Sketch] = None, context_encoding: Dict = None):
         batch_size = len(examples)
+        tensor_dict = {}
 
-        max_sketch_len = max(2 + len(sketch.operators) for sketch in sketches)
-        sketch_token_ids = np.zeros((batch_size, max_sketch_len), dtype=np.int64)
-        sketch_mask = np.zeros((batch_size, max_sketch_len), dtype=np.float32)
+        if context_encoding is None:
+            bert_input = self.get_bert_input(examples)
+            tensor_dict['bert_input'] = bert_input
+            tensor_dict['src_mask'] = bert_input['attention_mask']
+        else:
+            tensor_dict['src_mask'] = context_encoding['question_mask']
 
-        for i, (example, sketch) in enumerate(
-                zip(examples, sketches)):
+        if sketches is not None:
+            max_sketch_len = max(2 + len(sketch.operators) for sketch in sketches)
+            sketch_token_ids = np.zeros((batch_size, max_sketch_len), dtype=np.int64)
+            sketch_mask = np.zeros((batch_size, max_sketch_len), dtype=np.float32)
 
-            sketch = sketches[i]
-            sketch_token_id = [
-                self.sketch_vocab[token]
-                for token
-                in ['<s>'] + sketch.operators + ['</s>']
-            ]
+            for i, (example, sketch) in enumerate(
+                    zip(examples, sketches)):
 
-            sketch_token_ids[i, :len(sketch_token_id)] = sketch_token_id
-            sketch_mask[i, :len(sketch_token_id)] = 1.
+                sketch = sketches[i]
+                sketch_token_id = [
+                    self.sketch_vocab[token]
+                    for token
+                    in ['<s>'] + sketch.operators + ['</s>']
+                ]
 
-        bert_input = self.get_bert_input(examples)
-        tensor_dict = {
-            'bert_input': bert_input,
-            'tgt_sketch_token_ids': torch.tensor(sketch_token_ids, device=self.device),
-            'tgt_mask': torch.tensor(sketch_mask, device=self.device)
-        }
+                sketch_token_ids[i, :len(sketch_token_id)] = sketch_token_id
+                sketch_mask[i, :len(sketch_token_id)] = 1.
 
-        tensor_dict['src_mask'] = tensor_dict['bert_input']['attention_mask']
+            tensor_dict['tgt_sketch_token_ids'] = torch.tensor(sketch_token_ids, device=self.device)
+            tensor_dict['tgt_mask'] = torch.tensor(sketch_mask, device=self.device)
 
         return tensor_dict
 
-    def forward(self, examples: List[Any], sketches: List[Sketch]):
-        tensor_dict = self.to_tensor_dict(examples, sketches)
+    def get_trajectory_sketch_loss(self, trajectories: List[Trajectory], context_encoding: Dict = None):
+        questions = [
+            traj.context['question_tokens']
+            for traj in trajectories
+        ]
+
+        sketches = [
+            Sketch(traj.program)
+            for traj in trajectories
+        ]
+
+        sketch_log_prob = self.forward(questions, sketches, context_encoding)
+        sketch_loss = -sketch_log_prob.mean()
+
+        return sketch_loss
+
+    def forward(self, examples: List[Any], sketches: List[Sketch], context_encoding: Dict = None):
+        if self.use_agent_encoder:
+            assert context_encoding is not None
+
+        tensor_dict = self.to_tensor_dict(
+            examples, sketches, context_encoding)
 
         # (batch_size, sequence_len, encoding_size)
-        src_encodings, decoder_init_vec = self.encode(**tensor_dict['bert_input'])
+        # (batch_size, max_column_len, encoding_size)
+        src_encodings, column_encodings, decoder_init_state = self.encode(tensor_dict, context_encoding)
 
         tgt_sketch_token_ids = tensor_dict['tgt_sketch_token_ids']
 
         # (batch_size, sketch_len - 1, )
         att_vecs = self.decode(
             src_encodings,
-            tensor_dict['src_mask'],
-            decoder_init_vec,
+            column_encodings,
+            decoder_init_state,
             tgt_sketch_token_ids[:, :-1]
         )
 
@@ -260,8 +323,31 @@ class TrainableSketchManager(nn.Module):
 
         return sketch_prob
 
-    def encode(self, input_ids, segment_ids, attention_mask):
-        bert_sequence_output, _ = self.bert_model(
+    def encode(self, tensor_dict: Dict, context_encoding: Dict = None):
+        if self.use_agent_encoder:
+            src_encodings = {
+                'value': context_encoding['question_encoding'],
+                'key': context_encoding['question_encoding'],
+                'mask': context_encoding['question_mask']
+            }
+
+            column_encodings = {
+                'value': context_encoding['column_encoding'],
+                'key': context_encoding['column_encoding'],
+                'mask': context_encoding['column_mask']
+            }
+
+            decoder_state_init_vec = context_encoding['cls_encoding']
+        else:
+            src_encodings, decoder_state_init_vec = self._encode(**tensor_dict)
+            column_encodings = None
+
+        decoder_init_state = self.decoder_init(decoder_state_init_vec)
+
+        return src_encodings, column_encodings, decoder_init_state
+
+    def _encode(self, input_ids, segment_ids, attention_mask):
+        bert_sequence_output, _ = self.encoder_model(
             input_ids,
             segment_ids,
             attention_mask,
@@ -309,28 +395,26 @@ class TrainableSketchManager(nn.Module):
 
     def decoder_init(
         self,
-        src_encodings: torch.Tensor,
-        last_states: Optional[Any]
+        init_vec: torch.Tensor
     ) -> torch.Tensor:
-        cell_0 = self.decoder_init_linear(last_states)
+        cell_0 = self.decoder_init_linear(init_vec)
         state_0 = torch.tanh(cell_0)
 
         return [state_0, cell_0]
 
     def decode(
         self,
-        src_encodings: torch.Tensor,
-        src_mask: torch.Tensor,
+        src_encodings: Dict,
+        column_encodings: Dict,
         decoder_init_vec: torch.Tensor,
         tgt_token_ids: torch.Tensor
     ):
-        batch_size = src_encodings.size(0)
+        batch_size = tgt_token_ids.size(0)
 
         # (batch_size, )
-        att_tm1 = src_encodings.new_zeros(batch_size, self.hidden_size)
-
-        src_encodings_att_linear = self.attention_value_to_key(src_encodings)
+        att_tm1 = torch.zeros(batch_size, self.hidden_size, device=self.device)
         h_tm1 = decoder_init_vec
+
         tgt_token_embeds = self.sketch_token_embedding(tgt_token_ids)
         att_ves = []
         for y_tm1_embed in tgt_token_embeds.split(split_size=1, dim=1):
@@ -341,8 +425,7 @@ class TrainableSketchManager(nn.Module):
                 x,
                 h_tm1,
                 src_encodings,
-                src_encodings_att_linear,
-                src_mask
+                column_encodings
             )
 
             att_tm1 = att_t
@@ -354,32 +437,62 @@ class TrainableSketchManager(nn.Module):
 
         return att_ves
 
-    def get_sketches(self, questions: List[Any], K=5):
-        return self._beam_search(questions, beam_size=K)
+    def get_sketches(self, envs: List[Environment], K=5):
+        # get context encoding from table BERT
+        context_encoding = self.encoder_model.encode([env.get_context() for env in envs])
 
-    def _beam_search(self, questions, beam_size: int, max_decoding_time_step: int = 6) -> List[List[Sketch]]:
-        input_tensors = self.get_bert_input(questions)
-        # (batch_size, sequence_len, encoding_size)
-        src_encodings, h_tm1 = self.encode(**input_tensors)
-        src_encodings_att_linear = self.attention_value_to_key(src_encodings)
+        tensor_dict = self.to_tensor_dict(
+            [
+                env.get_context()['question_tokens']
+                for env in envs
+            ],
+            sketches=None,
+            context_encoding=context_encoding
+        )
+
+        src_encodings, column_encodings, decoder_init_state = self.encode(
+            tensor_dict,
+            context_encoding=context_encoding
+        )
+
+        return self.beam_search(envs, src_encodings, column_encodings, decoder_init_state, beam_size=K)
+
+    def beam_search(
+            self,
+            examples: List[Any],
+            src_encodings: Dict,
+            column_encodings: Dict,
+            decoder_init_state: Tuple[torch.Tensor, torch.Tensor],
+            beam_size: int,
+            max_decoding_time_step: int = 6
+    ) -> List[List[Sketch]]:
+
+        all_beams = [[['<s>']] for _ in examples]
+        completed_hypotheses = [[] for _ in examples]
+
+        hyp_question_ids = torch.tensor(list(range(len(examples))), dtype=torch.long, device=self.device)
+        hyp_scores = torch.zeros(len(examples), dtype=torch.float, device=self.device)
 
         # (batch_size, hidden_size)
-        att_tm1 = src_encodings.new_zeros(len(questions), self.hidden_size)
-
-        all_beams = [[['<s>']] for _ in questions]
-        completed_hypotheses = [[] for _ in questions]
-
-        hyp_question_ids = torch.tensor(list(range(len(questions))), dtype=torch.long, device=self.device)
-        hyp_scores = torch.zeros(len(questions), dtype=torch.float, device=self.device)
-
+        att_tm1 = torch.zeros(len(examples), self.hidden_size, device=self.device)
+        h_tm1 = decoder_init_state
         t = 0
+
+        def __select_encodings(_encodings: Dict, indices: torch.Tensor):
+            selected_tensor_dict = {
+                name: value.index_select(0, indices)
+                for name, value
+                in _encodings.items()
+            }
+
+            return selected_tensor_dict
+
         while t < max_decoding_time_step:
             t += 1
 
             # (total_hyp_num, src_len, *)
-            exp_src_encodings = src_encodings.index_select(index=hyp_question_ids, dim=0)
-            exp_src_encodings_att_linear = src_encodings_att_linear.index_select(index=hyp_question_ids, dim=0)
-            exp_src_mask = input_tensors['attention_mask'].index_select(index=hyp_question_ids, dim=0)
+            exp_src_encodings = __select_encodings(src_encodings, hyp_question_ids)
+            exp_column_encodings = __select_encodings(column_encodings, hyp_question_ids)
 
             y_tm1 = torch.tensor(
                 [self.sketch_vocab[hyp[-1]]
@@ -395,8 +508,7 @@ class TrainableSketchManager(nn.Module):
                 x,
                 h_tm1,
                 exp_src_encodings,
-                exp_src_encodings_att_linear,
-                exp_src_mask
+                exp_column_encodings
             )
 
             # (total_hyp_num, vocab_size)
@@ -494,11 +606,15 @@ class SketchManagerTrainer(object):
         self.model = model
 
         no_grad = ['pooler']
-        bert_params = list([
-            (p_name, p)
-            for (p_name, p) in model.bert_model.named_parameters()
-            if not any(pn in p_name for pn in no_grad) and p.requires_grad])
-        no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+        if self.model.use_agent_encoder:
+            bert_params = no_decay = []
+        else:
+            bert_params = list([
+                (p_name, p)
+                for (p_name, p) in model.encoder_model.named_parameters()
+                if not any(pn in p_name for pn in no_grad) and p.requires_grad])
+            no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+
         bert_grouped_parameters = [
             {'params': [p for n, p in bert_params if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
             {'params': [p for n, p in bert_params if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
@@ -510,7 +626,7 @@ class SketchManagerTrainer(object):
             p
             for n, p
             in model.named_parameters()
-            if 'bert_model' not in n and p.requires_grad
+            if 'encoder_model' not in n and p.requires_grad
         ]
 
         self.bert_optimizer = BertAdam(
@@ -525,7 +641,7 @@ class SketchManagerTrainer(object):
 
         self.freeze_bert_for_niter = freeze_bert_for_niter
 
-    def step(self, trajectories: List[Trajectory], train_iter: int):
+    def step(self, trajectories: List[Trajectory], train_iter: int, context_encoding: Dict = None):
         questions = [
             traj.context['question_tokens']
             for traj in trajectories
@@ -539,7 +655,7 @@ class SketchManagerTrainer(object):
         self.bert_optimizer.zero_grad()
         self.optimizer.zero_grad()
 
-        sketch_log_prob = self.model(questions, sketches)
+        sketch_log_prob = self.model(questions, sketches, context_encoding)
         sketch_loss = -sketch_log_prob.mean()
         sketch_loss.backward()
 

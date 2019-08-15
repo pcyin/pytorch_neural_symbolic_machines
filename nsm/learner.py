@@ -73,11 +73,9 @@ class Learner(torch_mp.Process):
         #     for p in model.encoder.bert_model.parameters():
         #         p.requires_grad = False
 
-        no_grad = ['pooler']
         bert_params = [
             (p_name, p)
             for (p_name, p) in model.encoder.bert_model.named_parameters()
-            if not any(pn in p_name for pn in no_grad)
         ]
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
         bert_grouped_parameters = [
@@ -97,9 +95,8 @@ class Learner(torch_mp.Process):
             p
             for n, p
             in model.named_parameters()
-            if 'encoder.bert_model' not in n and 'sketch_manager' not in n and p.requires_grad
+            if 'encoder.bert_model' not in n and p.requires_grad
         ]
-        optimizer = torch.optim.Adam(other_params, lr=0.001)
         use_finetune = config['use_finetune']
 
         cum_loss = cum_examples = 0.
@@ -132,14 +129,8 @@ class Learner(torch_mp.Process):
 
             retrainer = Retrainer(model, train_set, nearest_neighbors, config)
 
-        use_trainable_sketch_manager = model.sketch_manager is not None
-        if use_trainable_sketch_manager:
-            sketch_trainer = SketchManagerTrainer(
-                model.sketch_manager,
-                num_train_optimization_steps,
-                freeze_bert_for_niter=freeze_bert_for_niter,
-                config=config
-            )
+        use_trainable_sketch_manager = config.get('use_trainable_sketch_manager', False)
+        optimizer = torch.optim.Adam(other_params, lr=0.001)
 
         max_batch_size = self.config['batch_size'] * (self.config['n_replay_samples'] + self.config['n_policy_samples'])
 
@@ -163,7 +154,7 @@ class Learner(torch_mp.Process):
             train_trajectories = [sample.trajectory for sample in train_samples]
 
             # (batch_size)
-            batch_log_prob, entropy = self.agent(train_trajectories, entropy=True)
+            batch_log_prob, meta_info = self.agent(train_trajectories, return_info=True)
 
             train_sample_weights = batch_log_prob.new_tensor([s.weight for s in train_samples])
             batch_log_prob = batch_log_prob * train_sample_weights
@@ -178,6 +169,13 @@ class Learner(torch_mp.Process):
 
                 summary_writer.add_scalar('entropy', entropy.item(), train_iter)
                 summary_writer.add_scalar('entropy_reg_loss', ent_reg_loss.item(), train_iter)
+
+            if use_trainable_sketch_manager:
+                sketch_loss = model.sketch_manager.get_trajectory_sketch_loss(
+                    train_trajectories,
+                    context_encoding=meta_info['context_encoding']
+                )
+                loss = loss + sketch_loss
 
             loss.backward()
             loss_val = loss.item()
@@ -240,9 +238,6 @@ class Learner(torch_mp.Process):
                 model.load_state_dict(model_state)
 
                 model.train()
-
-            if use_trainable_sketch_manager:
-                sketch_trainer.step(train_trajectories, train_iter=train_iter)
 
             if train_iter % save_every_niter == 0:
                 print(f'[Learner] train_iter={train_iter} avg. loss={cum_loss / cum_examples}, '
