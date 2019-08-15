@@ -177,7 +177,7 @@ class Learner(torch_mp.Process):
                     context_encoding=meta_info['context_encoding']['table_bert_encoding']
                 )
 
-                sketch_loss = -(sketch_log_prob * train_sample_weights).mean()
+                sketch_loss = -(sketch_log_prob).mean()
                 summary_writer.add_scalar('sketch_loss', sketch_loss.item(), train_iter)
 
                 loss = loss + sketch_loss
