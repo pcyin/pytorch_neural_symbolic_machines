@@ -1,5 +1,7 @@
+import json
 import sys
 from collections import namedtuple
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -173,7 +175,24 @@ class TrainableSketchManager(nn.Module):
         params.update(config)
 
         if params['sketch_decoder_use_table_bert']:
-            bert_model = kwargs['encoder'].bert_model
+            if params['sketch_decoder_use_parser_table_bert']:
+                bert_model = kwargs['encoder'].bert_model
+            else:
+                tb_path = params.get('table_bert_model')
+                if tb_path:
+                    tb_path = Path(tb_path)
+                    bert_model = TableBERT.load(
+                        tb_path, tb_path.parent / 'tb_config.json',
+                        column_representation=params['column_representation']
+                    )
+                else:
+                    bert_model = TableBERT.from_pretrained(
+                        params['bert_model'],
+                        tokenizer=BertTokenizer.from_pretrained(params['bert_model']),
+                        table_bert_config=json.load(open(params['table_bert_config_file'])),
+                        column_representation=params['column_representation']
+                    )
+
             tokenizer = bert_model.tokenizer
         else:
             bert_model = BertModel.from_pretrained(params['bert_model'])
@@ -193,7 +212,8 @@ class TrainableSketchManager(nn.Module):
     @classmethod
     def default_params(cls):
         return {
-            'sketch_decoder_use_table_bert': False,
+            'sketch_decoder_use_table_bert': True,
+            'sketch_decoder_use_parser_table_bert': True,
             'bert_model': 'bert-base-uncased',
             'sketch_decoder_hidden_size': 256,
             'sketch_decoder_token_embed_size': 256,
@@ -261,12 +281,18 @@ class TrainableSketchManager(nn.Module):
 
         return bert_input
 
-    def to_tensor_dict(self, examples: List[Any], sketches: List[Sketch] = None, context_encoding: Dict = None):
-        batch_size = len(examples)
+    def to_tensor_dict(self, env_contexts: List[Dict], sketches: List[Sketch] = None, context_encoding: Dict = None):
+        batch_size = len(env_contexts)
         tensor_dict = {}
 
-        if context_encoding is None:
-            bert_input = self.get_bert_input(examples)
+        if self.use_table_bert:
+            if context_encoding is None:
+                tensor_dict['bert_input'] = [
+                    Example(question=e['question_tokens'], table=e['table'])
+                    for e in env_contexts
+                ]
+        else:
+            bert_input = self.get_bert_input(env_contexts)
             tensor_dict['bert_input'] = bert_input
 
         if sketches is not None:
@@ -275,7 +301,7 @@ class TrainableSketchManager(nn.Module):
             sketch_mask = np.zeros((batch_size, max_sketch_len), dtype=np.float32)
 
             for i, (example, sketch) in enumerate(
-                    zip(examples, sketches)):
+                    zip(env_contexts, sketches)):
 
                 sketch = sketches[i]
                 sketch_token_id = [
@@ -292,12 +318,9 @@ class TrainableSketchManager(nn.Module):
 
         return tensor_dict
 
-    def forward(self, examples: List[Any], sketches: List[Sketch], context_encoding: Dict = None):
-        if self.use_table_bert:
-            assert context_encoding is not None
-
+    def forward(self, env_contexts: List[Dict], sketches: List[Sketch], context_encoding: Dict = None):
         tensor_dict = self.to_tensor_dict(
-            examples, sketches, context_encoding)
+            env_contexts, sketches, context_encoding)
 
         # (batch_size, sequence_len, encoding_size)
         # (batch_size, max_column_len, encoding_size)
@@ -331,8 +354,12 @@ class TrainableSketchManager(nn.Module):
         return sketch_prob
 
     def get_trajectory_sketch_prob(self, trajectories: List[Trajectory], context_encoding: Dict = None):
-        questions = [
-            traj.context['question_tokens']
+        # questions = [
+        #     traj.context['question_tokens']
+        #     for traj in trajectories
+        # ]
+        env_contexts = [
+            traj.context
             for traj in trajectories
         ]
 
@@ -341,13 +368,23 @@ class TrainableSketchManager(nn.Module):
             for traj in trajectories
         ]
 
-        sketch_log_prob = self.forward(questions, sketches, context_encoding)
+        sketch_log_prob = self.forward(env_contexts, sketches, context_encoding)
         # sketch_loss = -sketch_log_prob.mean()
 
         return sketch_log_prob
 
     def encode(self, tensor_dict: Dict, context_encoding: Dict = None):
         if self.use_table_bert:
+            if context_encoding is None:
+                question_encoding, table_column_encoding, info = self.bert_model.encode(
+                    tensor_dict['bert_input'])
+
+                context_encoding = {
+                    'question_encoding': question_encoding,
+                    'column_encoding': table_column_encoding,
+                }
+                context_encoding.update(info['tensor_dict'])
+
             if self.freeze_bert:
                 context_encoding['question_encoding'] = context_encoding['question_encoding'].detach()
                 context_encoding['column_encoding'] = context_encoding['column_encoding'].detach()
@@ -474,30 +511,27 @@ class TrainableSketchManager(nn.Module):
 
     def get_sketches(self, envs: List[Environment], K=5):
         # get context encoding from table BERT
-        question_encoding, column_encoding, info = self.bert_model.encode([
-            Example(question=e.context['question_tokens'], table=e.context['table'])
-            for e in envs
-        ])
-
-        context_encoding = {
-            'question_encoding': question_encoding,
-            'column_encoding': column_encoding,
-        }
-        context_encoding.update(info['tensor_dict'])
+        # question_encoding, column_encoding, info = self.bert_model.encode([
+        #     Example(question=e.context['question_tokens'], table=e.context['table'])
+        #     for e in envs
+        # ])
+        #
+        # context_encoding = {
+        #     'question_encoding': question_encoding,
+        #     'column_encoding': column_encoding,
+        # }
+        # context_encoding.update(info['tensor_dict'])
 
         tensor_dict = self.to_tensor_dict(
             [
-                env.get_context()['question_tokens']
+                env.context
                 for env in envs
             ],
             sketches=None,
-            context_encoding=context_encoding
+            context_encoding=None
         )
 
-        src_encodings, column_encodings, decoder_init_state = self.encode(
-            tensor_dict,
-            context_encoding=context_encoding
-        )
+        src_encodings, column_encodings, decoder_init_state = self.encode(tensor_dict)
 
         return self.beam_search(envs, src_encodings, column_encodings, decoder_init_state, beam_size=K)
 

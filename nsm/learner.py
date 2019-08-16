@@ -75,8 +75,10 @@ class Learner(torch_mp.Process):
 
         bert_params = [
             (p_name, p)
-            for (p_name, p) in model.encoder.bert_model.named_parameters()
+            for (p_name, p) in model.named_parameters()
+            if 'bert_model' in p_name
         ]
+
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
         bert_grouped_parameters = [
             {'params': [p for n, p in bert_params if not any(nd in n for nd in no_decay)],
@@ -95,7 +97,7 @@ class Learner(torch_mp.Process):
             p
             for n, p
             in model.named_parameters()
-            if 'encoder.bert_model' not in n and p.requires_grad
+            if 'bert_model' not in n and p.requires_grad
         ]
         use_finetune = config['use_finetune']
 
@@ -172,12 +174,17 @@ class Learner(torch_mp.Process):
                 summary_writer.add_scalar('entropy_reg_loss', ent_reg_loss.item(), train_iter)
 
             if use_trainable_sketch_manager:
+                context_encoding = meta_info['context_encoding']['table_bert_encoding'] if \
+                    config.get('sketch_decoder_use_table_bert', False) and \
+                    config.get('sketch_decoder_use_parser_table_bert', False) \
+                    else None
+
                 sketch_log_prob = model.sketch_manager.get_trajectory_sketch_prob(
                     train_trajectories,
-                    context_encoding=meta_info['context_encoding']['table_bert_encoding']
+                    context_encoding=context_encoding
                 )
 
-                sketch_loss = -(sketch_log_prob).mean()
+                sketch_loss = -(sketch_log_prob * train_sample_weights).mean()
                 summary_writer.add_scalar('sketch_loss', sketch_loss.item(), train_iter)
 
                 loss = loss + sketch_loss

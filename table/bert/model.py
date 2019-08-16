@@ -4,7 +4,7 @@ from collections import OrderedDict
 from pathlib import Path
 import json
 from types import SimpleNamespace
-from typing import List, Dict
+from typing import List, Dict, Union
 import numpy as np
 
 import torch
@@ -182,6 +182,31 @@ class TableBERT(BertForMaskedLM):
             use_sample_value=True,
             context_first=True
         )
+
+    @classmethod
+    def load(
+        cls,
+        model_path: Union[str, Path],
+        config_file: Union[str, Path],
+        column_representation: str = 'mean_pool_column_name'
+    ):
+        if isinstance(model_path, str):
+            model_path = Path(model_path)
+        if isinstance(config_file, str):
+            config_file = Path(config_file)
+
+        state_dict = torch.load(str(model_path), map_location='cpu')
+        config = json.load(config_file.open())
+
+        model = cls.from_pretrained(
+            config['bert_model'],
+            state_dict=state_dict,
+            tokenizer=BertTokenizer.from_pretrained(config['bert_model']),
+            table_bert_config=config,
+            column_representation=column_representation
+        )
+
+        return model
 
     @property
     def output_size(self):
