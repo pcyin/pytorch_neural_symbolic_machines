@@ -1627,11 +1627,7 @@ class PGAgent(nn.Module):
             for batched_envs in tqdm(batch_iter, total=len(environments) // batch_size, file=sys.stdout):
                 if use_sketch_constrained_decoding:
                     batched_hyp_sketches = self.sketch_manager.get_sketches(
-                        [
-                            env.context['question_tokens']
-                            for env in batched_envs
-                        ],
-                        K=num_sketch
+                        batched_envs, K=num_sketch
                     )
                     constraint_sketches = {
                         env.name: sketches
