@@ -134,9 +134,15 @@ class BertEncoder(EncoderBase):
             if isinstance(module, nn.Linear) and module.bias is not None:
                 module.bias.data.zero_()
 
-        self.bert_output_project.apply(_init_weights)
-        self.bert_table_output_project.apply(_init_weights)
-        self.question_encoding_att_value_to_key.apply(_init_weights)
+        modules = [
+            module
+            for name, module
+            in self._modules.items()
+            if module and 'bert_model' not in name
+        ]
+
+        for module in modules:
+            module.apply(_init_weights)
 
     @classmethod
     def build(cls, config):

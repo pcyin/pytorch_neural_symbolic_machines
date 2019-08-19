@@ -14,9 +14,6 @@ class Sketch(object):
             self.tokens = tokens
 
         self._sketch_str = ' '.join(self.tokens)
-        if prob is not None:
-            self._sketch_str += f' (prob={prob})'
-
         self.operators = self.get_operators(program)
         self.prob = prob
 
@@ -35,7 +32,9 @@ class Sketch(object):
         return hash(self._sketch_str)
 
     def __repr__(self):
-        return self._sketch_str
+        return self._sketch_str + (f' (prob={self.prob})'
+                                   if self.prob is not None
+                                   else '')
 
     def __eq__(self, other):
         if not isinstance(other, Sketch):
