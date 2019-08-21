@@ -19,7 +19,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
-from nsm import nn_util, data_utils
+from nsm import nn_util, data_utils, executor_factory
+from nsm.computer_factory import SPECIAL_TKS
 from nsm.embedding import EmbeddingModel, Embedder
 from nsm.env_factory import Observation, Trajectory, QAProgrammingEnv, Sample
 
@@ -1677,6 +1678,23 @@ class PGAgent(nn.Module):
 
     @staticmethod
     def build(config, params=None):
+        dummy_kg = {
+            'kg': None,
+            'num_props': [],
+            'datetime_props': [],
+            'props': [],
+            'row_ents': []
+        }
+
+        executor = executor_factory.WikiTableExecutor(dummy_kg)
+        api = executor.get_api()
+        op_vocab = data_utils.Vocab(
+            [f['name'] for f in api['func_dict'].values()] +
+            ['all_rows'] +
+            SPECIAL_TKS
+        )
+        config['builtin_func_num'] = op_vocab.size
+
         encoder = BertEncoder.build(config)
         decoder = BertDecoder.build(config, encoder)
 

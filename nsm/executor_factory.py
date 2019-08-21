@@ -464,6 +464,40 @@ class TableExecutor(SimpleKGExecutor):
         super(TableExecutor, self).__init__(table_info)
         self.n_rows = len(table_info['row_ents'])
 
+    def comparative_select(self, ents, prop, operator='ge'):
+        """Select the entity list whose value of the given property is larger or equal to"""
+        cast_func = self.get_cast_func(prop)
+
+        assert len(ents) == 2
+
+        prop_values = list(map(
+            cast_func,
+            self.hop(ents, prop, keep_dup=True)
+        ))
+
+        if operator == 'ge':
+            if prop_values[0] >= prop_values[1]:
+                result = [ents[0]]
+            else:
+                result = [ents[1]]
+        elif operator == 'less':
+            if prop_values[0] < prop_values[1]:
+                result = [ents[0]]
+            else:
+                result = [ents[1]]
+        else:
+            raise ValueError('Unknown operator {}'.format(operator))
+
+        return result
+
+    def select_ge(self, ents, prop):
+        return self.comparative_select(
+            ents, prop, operator='ge')
+
+    def select_less(self, ents, prop):
+        return self.comparative_select(
+            ents, prop, operator='less')
+
     def filter_ge(self, ents_1, nums, prop):
         """Filter out entities whose prop >= nums."""
         result = []
@@ -521,6 +555,30 @@ class TableExecutor(SimpleKGExecutor):
                     break
 
         return result
+
+    def autocomplete_comparative_select(self, exp, tokens, token_vals):
+        exp_len = len(exp)
+
+        # ( select_ge|select_less row_set prop )
+        if exp_len == 1:  # row_set/entity list
+            # only retain entries with size equal to two
+            valid_tks = [tk for tk, val in zip(tokens, token_vals)
+                         if len(val['value']) == 2]
+        elif exp_len == 2:  # property
+            # we require the property values for both entities are non-empty
+            valid_tks = []
+            ents = exp[1]['value']
+
+            for tk, token_val in zip(tokens, token_vals):
+                prop = token_val['value']
+
+                prop_values = self.hop(ents, prop, keep_dup=True)
+                if len(prop_values) == 2:
+                    valid_tks.append(tk)
+        else:
+            raise ValueError('Expression is too long: {}'.format(exp_len))
+
+        return valid_tks
 
     def autocomplete_filter_ops(self, exp, tokens, token_vals, debug=False):
         exp_len = len(exp)
@@ -1069,6 +1127,30 @@ class TableExecutor(SimpleKGExecutor):
             autocomplete=self.autocomplete_diff,
             type='primitive_function',
             value=self.diff)
+
+        func_dict['select_ge'] = dict(
+            name='select_ge',
+            args=[
+                {'types': ['entity_list']},
+                {'types': ['ordered_property']}
+            ],
+            return_type='entity_list',
+            autocomplete=self.autocomplete_comparative_select,
+            type='primitive_function',
+            value=self.select_ge
+        )
+
+        func_dict['select_less'] = dict(
+            name='select_less',
+            args=[
+                {'types': ['entity_list']},
+                {'types': ['ordered_property']}
+            ],
+            return_type='entity_list',
+            autocomplete=self.autocomplete_comparative_select,
+            type='primitive_function',
+            value=self.select_less
+        )
 
         constant_dict = collections.OrderedDict()
 
