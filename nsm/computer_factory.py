@@ -1,6 +1,8 @@
 """Computers can read in tokens, parse them into a program, and execute it."""
 
 from __future__ import print_function
+
+import json
 from collections import OrderedDict
 import re
 import copy
@@ -180,6 +182,9 @@ class LispInterpreter(object):
             else:
                 result = self.namespace.valid_tokens(
                     {'types': ['head']}, self.get_type_ancestors)
+                # remove expression like (hop v v) (filter_str_contain_any)
+                # if self.n_exp == 1 and self.history[1] == 'hop':
+                #     result.remove('filter_str_contain_any')
         return result
 
     def parse_step(self, token):
@@ -294,7 +299,8 @@ class LispInterpreter(object):
                 result = self.read_token(tk)
                 print('Read in [{}], valid tokens: {}'.format(tk, self.valid_tokens()))
                 if result:
-                    print(result['value'])
+                    print('Result:')
+                    print(json.dumps(result, indent=2))
             # except Exception as e:
             #   print(e)
             #   continue
