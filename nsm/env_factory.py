@@ -311,7 +311,7 @@ class QAProgrammingEnv(Environment):
                                 constant_value_embeddings=constant_value_embeddings,
                                 question_features=question_annotation['features'],
                                 question_tokens=tokens,
-                                table=question_annotation['table'])
+                                table=question_annotation['table'] if 'table' in question_annotation else None)
 
         # Create output features.
         if id_feature_dict:
