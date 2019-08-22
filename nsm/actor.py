@@ -65,7 +65,7 @@ class ReplayBuffer(object):
                         print(f'Error loading program {program} for env {env.name}', file=sys.stderr)
                         continue
 
-                    if traj is not None:
+                    if traj is not None and traj.reward > 0.:
                         trajectories.append(traj)
                         found = True
                         n_found += 1
