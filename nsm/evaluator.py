@@ -86,7 +86,7 @@ class Evaluator(torch_mp.Process):
                 print(f'[Evaluator] evaluate model [{self.model_path}]', file=sys.stderr)
                 t1 = time.time()
 
-                decode_results = self.agent.decode_examples(self.environments, beam_size=self.config['beam_size'])
+                decode_results = self.agent.decode_examples(self.environments, beam_size=self.config['beam_size'], batch_size=32)
 
                 eval_results = Evaluation.evaluate_decode_results(self.environments, decode_results)
 

@@ -509,6 +509,7 @@ def distributed_train(args):
     print('starting %d actors' % actor_num, file=sys.stderr)
     for actor in actors:
         actor.start()
+        pass
 
     print('starting evaluator', file=sys.stderr)
     evaluator.start()
@@ -664,28 +665,32 @@ def sanity_check():
 
 
 def run_example():
-    envs = load_environments(["/Users/pengcheng/Research/datasets/wikitable/processed_input/train_examples.jsonl"],
-                             "/Users/pengcheng/Research/datasets/wikitable/processed_input/tables.jsonl",
-                             vocab_file="/Users/pengcheng/Research/datasets/wikitable/raw_input/wikitable_glove_vocab.json",
-                             en_vocab_file="/Users/pengcheng/Research/datasets/wikitable/processed_input/preprocess_14/en_vocab_min_count_5.json",
-                             embedding_file="/Users/pengcheng/Research/datasets/wikitable/raw_input/wikitable_glove_embedding_mat.npy")
-    #
-    env_dict = {env.name: env for env in envs}
-    env_dict['nt-3035'].interpreter.interactive(assisted=True)
+    # envs = load_environments(["/Users/pengcheng/Research/datasets/wikitable/processed_input/train_examples.jsonl"],
+    #                          "/Users/pengcheng/Research/datasets/wikitable/processed_input/tables.jsonl",
+    #                          vocab_file="/Users/pengcheng/Research/datasets/wikitable/raw_input/wikitable_glove_vocab.json",
+    #                          en_vocab_file="/Users/pengcheng/Research/datasets/wikitable/processed_input/preprocess_14/en_vocab_min_count_5.json",
+    #                          embedding_file="/Users/pengcheng/Research/datasets/wikitable/raw_input/wikitable_glove_embedding_mat.npy")
+    # #
+    # env_dict = {env.name: env for env in envs}
+    # env_dict['nt-3035'].interpreter.interactive(assisted=True)
 
-    examples = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/data_split_1/train_split.jsonl")
-    tables = load_jsonl("/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/tables.jsonl")
+    examples = load_jsonl(
+        "/Users/pengcheng/Research/datasets/wikitable/processed_input/wtq_preprocess_revised/"
+        "train_examples.jsonl")
+    tables = load_jsonl(
+        "/Users/pengcheng/Research/datasets/wikitable/processed_input/wtq_preprocess_revised/"
+        "tables.jsonl")
     # # # #
     examples_dict = {e['id']: e for e in examples}
     tables_dict = {tab['name']: tab for tab in tables}
     # # # #
-    q_id = 'nt-3302'
+    q_id = 'nt-924' # 'nt-10767'
     interpreter = init_interpreter_for_example(examples_dict[q_id], tables_dict[examples_dict[q_id]['context']]).clone()
     interpreter.interactive(assisted=True)
-    program = ['(', 'argmax', 'all_rows', 'v4', ')', '(', 'hop', 'v8', 'v2', ')', '<END>']
-    for token in program:
-        print(interpreter.valid_tokens())
-        interpreter.read_token(token)
+    # program = ['(', 'argmax', 'all_rows', 'v4', ')', '(', 'hop', 'v8', 'v2', ')', '<END>']
+    # for token in program:
+    #     print(interpreter.valid_tokens())
+    #     interpreter.read_token(token)
     # from table.wtq.evaluator import check_prediction
     # is_correct = utils.wtq_score([0.4], ['00.4', '0.4'])
     # print(is_correct)

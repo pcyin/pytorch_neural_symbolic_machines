@@ -27,7 +27,7 @@ import torch
 from tensorboardX import SummaryWriter
 
 from nsm.dist_util import STOP_SIGNAL
-from nsm.sketch.sketch_generator import TrainableSketchManager, SketchManagerTrainer
+from nsm.sketch.sketch_generator import SketchPredictor, SketchManagerTrainer
 
 
 class Learner(torch_mp.Process):
@@ -173,21 +173,21 @@ class Learner(torch_mp.Process):
                 summary_writer.add_scalar('entropy', entropy.item(), train_iter)
                 summary_writer.add_scalar('entropy_reg_loss', ent_reg_loss.item(), train_iter)
 
-            if use_trainable_sketch_manager:
-                context_encoding = meta_info['context_encoding']['table_bert_encoding'] if \
-                    config.get('sketch_decoder_use_table_bert', False) and \
-                    config.get('sketch_decoder_use_parser_table_bert', False) \
-                    else None
-
-                sketch_log_prob = model.sketch_manager.get_trajectory_sketch_prob(
-                    train_trajectories,
-                    context_encoding=context_encoding
-                )
-
-                sketch_loss = -(sketch_log_prob * train_sample_weights).mean()
-                summary_writer.add_scalar('sketch_loss', sketch_loss.item(), train_iter)
-
-                loss = loss + sketch_loss
+            # if use_trainable_sketch_manager:
+            #     context_encoding = meta_info['context_encoding']['table_bert_encoding'] if \
+            #         config.get('sketch_decoder_use_table_bert', False) and \
+            #         config.get('sketch_decoder_use_parser_table_bert', False) \
+            #         else None
+            #
+            #     sketch_log_prob = model.sketch_manager.get_trajectory_sketch_prob(
+            #         train_trajectories,
+            #         context_encoding=context_encoding
+            #     )
+            #
+            #     sketch_loss = -(sketch_log_prob * train_sample_weights).mean()
+            #     summary_writer.add_scalar('sketch_loss', sketch_loss.item(), train_iter)
+            #
+            #     loss = loss + sketch_loss
 
             loss.backward()
             loss_val = loss.item()

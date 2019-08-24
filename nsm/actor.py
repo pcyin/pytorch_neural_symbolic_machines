@@ -354,7 +354,7 @@ class Actor(torch_mp.Process):
                     try:
                         # print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}', file=sys.stderr)
                         # perform sampling
-                        if self.use_sketch_exploration:
+                        if None:  # self.use_sketch_exploration:
                             constraint_sketches = dict()
                             num_sketches_per_example = config.get('num_candidate_sketches', 5)
                             remove_explored_sketch = config.get('remove_explored_sketch', True)

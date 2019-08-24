@@ -28,6 +28,12 @@ class Sketch(object):
 
         return sketch_tokens
 
+    def __getitem__(self, item):
+        return self.tokens[item]
+
+    def __len__(self):
+        return len(self.tokens)
+
     def __hash__(self):
         return hash(self._sketch_str)
 
@@ -86,6 +92,10 @@ class Sketch(object):
                 break
 
         return is_compatible
+
+    @staticmethod
+    def is_variable_slot(token):
+        return token == 'v'
 
 
 class SketchManager(object):
