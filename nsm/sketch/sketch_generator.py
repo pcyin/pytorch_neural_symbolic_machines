@@ -121,7 +121,7 @@ class SketchPredictor(nn.Module):
         self.sketch_vocab = {
             token: idx
             for idx, token
-            in enumerate(['<s>', '</s>', 'v', '(', ')', '<END>'] + operators)
+            in enumerate(['<s>', '</s>', 'v'] + operators)
         }
         self.sketch_id2token = {
             idx: token
@@ -219,7 +219,7 @@ class SketchPredictor(nn.Module):
             'sketch_decoder_use_parser_table_bert': True,
             'bert_model': 'bert-base-uncased',
             'sketch_decoder_hidden_size': 256,
-            'sketch_decoder_token_embed_size': 256,
+            'sketch_decoder_token_embed_size': 128,
             'sketch_decoder_freeze_bert': False,
             'sketch_decoder_use_lstm_encoder': False
         }
@@ -686,26 +686,55 @@ class SketchEncoder(nn.Module):
     def __init__(
             self,
             output_size: int,
-            embedding: nn.Embedding,
-            vocab: Dict
+            embedding: nn.Embedding = None,
+            embedding_size: int = None,
+            vocab: Dict = None
     ):
         super(SketchEncoder, self).__init__()
-
-        self.output_size = output_size
-        self.lstm = nn.LSTM(
-            embedding.embedding_dim, output_size // 2, bidirectional=True, batch_first=True)
 
         self.vocab = vocab
         self.embedding = embedding
 
+        if self.vocab is None:
+            self.executor_api = get_executor_api()
+            operators = sorted(self.executor_api['func_dict'])
+            self.vocab = {
+                token: idx
+                for idx, token
+                in enumerate(['<s>', '</s>', 'v', '(', ')', '<END>'] + operators)
+            }
+
+        if embedding is None:
+            self.embedding = nn.Embedding(len(self.vocab), embedding_size)
+
+        self.output_size = output_size
+        self.lstm = nn.LSTM(
+            self.embedding.embedding_dim, output_size // 2, bidirectional=True, batch_first=True)
+
+        self.init_weights()
+
+    def init_weights(self):
+        print('Init sketch encoder weights')
+
+        def _init_weights(_module):
+            if isinstance(_module, (nn.Linear, nn.Embedding)):
+                _module.weight.data.normal_(mean=0.0, std=0.02)
+            if isinstance(_module, nn.Linear) and _module.bias is not None:
+                _module.bias.data.zero_()
+
+        for module in [
+            self.embedding
+        ]:
+            module.apply(_init_weights)
+
     @classmethod
     def build(cls, config: Dict, sketch_predictor: SketchPredictor):
         output_size = config.get('en_embedding_size', 100)
+        embedding_size = config.get('sketch_decoder_token_embed_size', 128)
 
         return cls(
             output_size,
-            sketch_predictor.sketch_token_embedding,
-            sketch_predictor.sketch_vocab
+            embedding_size=embedding_size
         )
 
     @property

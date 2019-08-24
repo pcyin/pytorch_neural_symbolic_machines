@@ -432,6 +432,12 @@ class QAProgrammingEnv(Environment):
             # Add the actions that are filtered by cache into the
             # training example because at test time, they will be
             # there (no cache is available).
+
+            # Note that this part is a bit tricky, `self.obs.valid_actions`
+            # maintains all valid actions regardless of the cache, while the returned
+            # observation `ob` only has valid continuating actions not covered by
+            # the cache. `self.obs` shall only be used in training to compute
+            # valid action masks for trajectories
             if self.use_cache:
                 valid_actions = self.valid_actions + cached_actions
 

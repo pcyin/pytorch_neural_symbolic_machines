@@ -261,19 +261,20 @@ class PGAgent(nn.Module):
         sketches = []
         duplicated_envs = []
 
-        for i, env in enumerate(environments):
-            env_sketches = batch_env_sketches[i]
+        for env_idx, env in enumerate(environments):
+            env_sketches = batch_env_sketches[env_idx]
             if not env_sketches:
                 continue
 
             env_probs = np.exp([sketch.prob for sketch in env_sketches])
             env_probs /= env_probs.sum()
 
-            sampled_sketches = np.random.choice(
-                env_sketches,
+            sampled_sketch_indices = np.random.choice(
+                list(range(len(env_sketches))),
                 size=sample_num, replace=True,
                 p=env_probs
             )
+            sampled_sketches = [env_sketches[idx] for idx in sampled_sketch_indices]
 
             sketches.extend(sampled_sketches)
             duplicated_envs.extend([
@@ -546,9 +547,9 @@ class PGAgent(nn.Module):
                     else:
                         # if it is an idle run step (encode sketch token)
                         abs_action_id = prev_hyp.env.de_vocab.lookup(sketch_token)
-                        valid_action_indices_tm1 = prev_hyp.env.obs[-1].valid_action_indices
-                        if abs_action_id in valid_action_indices_tm1:
-                            rel_action_id = valid_action_indices_tm1.index(abs_action_id)
+                        valid_action_indices = prev_hyp.env.valid_actions
+                        if abs_action_id in valid_action_indices:
+                            rel_action_id = valid_action_indices.index(abs_action_id)
 
                             candidate_hyp = CandidateHyp(
                                 sketch=prev_hyp.sketch,
