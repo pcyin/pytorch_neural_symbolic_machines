@@ -33,7 +33,8 @@ class PGAgent(nn.Module):
         encoder: EncoderBase, decoder: DecoderBase,
         sketch_predictor: SketchPredictor,
         sketch_encoder: SketchEncoder,
-        config: Dict, discount_factor: float = 1.0
+        config: Dict, discount_factor: float = 1.0,
+        log=None
     ):
         super(PGAgent, self).__init__()
 
@@ -45,6 +46,8 @@ class PGAgent(nn.Module):
 
         self.sketch_predictor = sketch_predictor
         self.sketch_encoder = sketch_encoder
+
+        self.log = log
 
     @property
     def memory_size(self):
@@ -258,6 +261,9 @@ class PGAgent(nn.Module):
             K=5
         )
 
+        if self.log:
+            print('*' * 10, 'SAMPLE BEGIN', '*' * 10, file=self.log)
+
         sketches = []
         duplicated_envs = []
 
@@ -266,7 +272,8 @@ class PGAgent(nn.Module):
             if not env_sketches:
                 continue
 
-            env_probs = np.exp([sketch.prob for sketch in env_sketches])
+            sample_temp = self.config.get('sketch_sample_temperature', 1.)
+            env_probs = np.exp([sketch.prob / sample_temp for sketch in env_sketches])
             env_probs /= env_probs.sum()
 
             sampled_sketch_indices = np.random.choice(
@@ -275,6 +282,16 @@ class PGAgent(nn.Module):
                 p=env_probs
             )
             sampled_sketches = [env_sketches[idx] for idx in sampled_sketch_indices]
+
+            if self.log:
+                print(f"Question [{env.name}]: {env.question_annotation['question']} ({len(env_sketches)} Sketches)",
+                      file=self.log)
+                for sketch in env_sketches:
+                    print(sketch, file=self.log)
+
+                print('Sampled Sketches:', file=self.log)
+                for sketch in sampled_sketches:
+                    print(sketch, file=self.log)
 
             sketches.extend(sampled_sketches)
             duplicated_envs.extend([
@@ -390,11 +407,17 @@ class PGAgent(nn.Module):
             observations_tm1 = observations_t
             active_envs = new_active_envs
 
+        # if self.log:
+        #     print("Samples:", file=self.log)
+
         samples = []
         for env_id, (env, prob) in enumerate(completed_envs):
             if not env.error:
                 traj = Trajectory.from_environment(env)
                 samples.append(Sample(trajectory=traj, prob=prob))
+
+                # if self.log:
+                #     print(f"{' '.join(traj.human_readable_program)} (correct={traj.reward == 1.}, prob={prob})", file=self.log)
 
         return samples
 
@@ -415,7 +438,7 @@ class PGAgent(nn.Module):
 
         CandidateHyp = collections.namedtuple(
             'CandidateHyp',
-            ['sketch', 'prev_hyp_env', 'action_id', 'rel_action_id', 'score', 'prev_hyp_abs_pos']
+            ['sketch', 'prev_hyp_env', 'action_id', 'rel_action_id', 'score', 'prev_hyp_abs_pos', 'human_action_token']
         )
 
         def _expand_encoding(_tensor_dict, indices, keys=None):
@@ -441,6 +464,9 @@ class PGAgent(nn.Module):
         # List[List * env_num]
         nested_hyp_sketches = self.sketch_predictor.get_sketches(environments, K=5)
 
+        if self.log:
+            print(f"Beam Search for questions:", file=self.log)
+
         hyp_sketches = []  # flatten the hyp sketch list
         flattened_hyp_env_idx_ptr = []
         hyp_num = 0
@@ -459,6 +485,21 @@ class PGAgent(nn.Module):
             ]
 
             flattened_hyp_env_idx_ptr.extend([i] * env_sketch_num)
+
+            if self.log:
+                print(f"[{env.name}] {env.question_annotation['question']}", file=self.log)
+
+        def _log_beam(_beams):
+            print("Current Beam Configuration:", file=self.log)
+            for env_name, beam in _beams.items():
+                print(f"======[{env_name}]======", file=self.log)
+                for hyp in beam:
+                    program = hyp.env.to_human_readable_program()
+                    print(f"sketch={hyp.sketch} program={program} (score={hyp.score})", file=self.log)
+
+        if self.log:
+            print(f"Initial Beam", file=self.log)
+            _log_beam(beams)
 
         if hyp_num == 0:
             return [] if return_list else completed_hyps
@@ -487,6 +528,9 @@ class PGAgent(nn.Module):
         )
 
         while beams:
+            if self.log:
+                print(f't={state_tm1.t}', file=self.log)
+
             batched_ob_tm1 = Observation.to_batched_input(observations_tm1, memory_size=self.memory_size).to(self.device)
 
             # (hyp_num, memory_size)
@@ -521,12 +565,21 @@ class PGAgent(nn.Module):
                 beam_new_cont_scores = cont_cand_hyp_scores[beam_start: beam_end]
                 continuing_candidates[env_name] = []
 
+                if self.log:
+                    print(f"Question[{env_name}] {live_beam_size} living hyps", file=self.log)
+
                 for prev_hyp_id, prev_hyp in enumerate(beam):
                     hyp_sketch = prev_hyp.sketch
                     sketch_token = hyp_sketch[state_tm1.t]
 
+                    if self.log:
+                        print(f"\tHyp: sketch={prev_hyp.sketch} program={prev_hyp.env.program} Sketch token={sketch_token} Score={prev_hyp.score}", file=self.log)
+
                     # if it is a variable grounding step
                     if hyp_sketch.is_variable_slot(sketch_token):
+                        if self.log:
+                            print(f"\tvariable grounding", file=self.log)
+
                         _cont_action_scores = beam_new_cont_scores[prev_hyp_id][
                             prev_hyp.env.obs[-1].valid_action_indices].cpu()
 
@@ -534,14 +587,24 @@ class PGAgent(nn.Module):
                             abs_action_id = prev_hyp.env.obs[-1].valid_action_indices[rel_action_id]
                             new_hyp_score = new_hyp_score.item()
                             if not math.isinf(new_hyp_score):
+                                if self.log:
+                                    action_token = prev_hyp.env.de_vocab.lookup(abs_action_id, reverse=True)
+                                    human_readable_token = prev_hyp.env.get_human_readable_action_token(action_token)
+                                else:
+                                    human_readable_token = None
+
                                 candidate_hyp = CandidateHyp(
                                     sketch=prev_hyp.sketch,
                                     prev_hyp_env=prev_hyp.env,
                                     rel_action_id=rel_action_id,
                                     action_id=abs_action_id,
                                     score=new_hyp_score,
-                                    prev_hyp_abs_pos=beam_start + prev_hyp_id
+                                    prev_hyp_abs_pos=beam_start + prev_hyp_id,
+                                    human_action_token=human_readable_token
                                 )
+
+                                if self.log:
+                                    print(f"\t\tvar={candidate_hyp.human_action_token} align score={new_hyp_score - prev_hyp.score}", file=self.log)
 
                                 continuing_candidates[env_name].append(candidate_hyp)
                     else:
@@ -557,13 +620,28 @@ class PGAgent(nn.Module):
                                 rel_action_id=rel_action_id,
                                 action_id=abs_action_id,
                                 score=prev_hyp.score,
-                                prev_hyp_abs_pos=beam_start + prev_hyp_id
+                                prev_hyp_abs_pos=beam_start + prev_hyp_id,
+                                human_action_token=sketch_token
                             )
                             continuing_candidates[env_name].append(candidate_hyp)
+
+                            if self.log:
+                                print(f"\t\tIdle run, use sketch token", file=self.log)
 
                 # rank all hypotheses together with completed ones
                 all_candidates = completed_hyps[env_name] + continuing_candidates[env_name]
                 all_candidates.sort(key=lambda hyp: hyp.score, reverse=True)
+
+                if self.log:
+                    print(f"Ranked hypothesis:", file=self.log)
+                    for hyp in all_candidates:
+                        if isinstance(hyp, Hypothesis):
+                            print("finished hyp", hyp.env.program, hyp.score, file=self.log)
+                        else:
+                            env = hyp.prev_hyp_env
+                            print(f"sketch={hyp.sketch} "
+                                  f"program={env.to_human_readable_program() + [hyp.human_action_token]} "
+                                  f"score={hyp.score}", file=self.log)
 
                 # top_k_candidates = heapq.nlargest(beam_size, all_candidates, key=lambda x: x.score)
                 completed_hyps[env_name] = []
@@ -622,6 +700,9 @@ class PGAgent(nn.Module):
 
             if len(new_beams) == 0:
                 break
+
+            if self.log:
+                _log_beam(new_beams)
 
             state_tm1 = state_t[new_hyp_parent_abs_pos_list]
             observations_tm1 = observations_t
@@ -899,11 +980,14 @@ class PGAgent(nn.Module):
         torch.save(params, model_path)
 
     @staticmethod
-    def load(model_path, default_values_handle, gpu_id=-1, **kwargs):
+    def load(model_path, default_values_handle=None, gpu_id=-1, **kwargs):
         device = torch.device("cuda:%d" % gpu_id if gpu_id >= 0 else "cpu")
         params = torch.load(model_path, map_location=lambda storage, loc: storage)
         config = params['config']
-        default_values_handle(config)
+
+        if default_values_handle:
+            default_values_handle(config)
+
         config.update(kwargs)
         kwargs = params['kwargs'] if params['kwargs'] is not None else dict()
 

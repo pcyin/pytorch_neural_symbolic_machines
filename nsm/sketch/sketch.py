@@ -97,6 +97,8 @@ class Sketch(object):
     def is_variable_slot(token):
         return token == 'v'
 
+    __str__ = __repr__
+
 
 class SketchManager(object):
     def __init__(

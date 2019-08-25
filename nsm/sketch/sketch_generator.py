@@ -121,7 +121,7 @@ class SketchPredictor(nn.Module):
         self.sketch_vocab = {
             token: idx
             for idx, token
-            in enumerate(['<s>', '</s>', 'v'] + operators)
+            in enumerate(['<s>', '</s>'] + operators)
         }
         self.sketch_id2token = {
             idx: token
