@@ -124,47 +124,16 @@ class BertDecoder(DecoderBase):
         return state
 
     def get_initial_memory(self, context_encoding: ContextEncoding):
-        # (batch_size, mem_size, 2)
-        constant_span = context_encoding['constant_spans']
-        # (batch_size, mem_size)
-        constant_span_mask = torch.ge(constant_span, 0)[:, :, 0].float()
-
-        # mask out entries <= 0
-        constant_span = constant_span * constant_span_mask.unsqueeze(-1).long()
-
-        # (batch_size, max_question_len, encoding_size)
-        question_token_encoding = context_encoding['question_encoding']
-
-        constant_span_size = constant_span.size()
-        mem_size = constant_span_size[1]
-        batch_size = question_token_encoding.size(0)
-
-        # (batch_size, mem_size, 2, embed_size)
-        constant_span_embedding = torch.gather(
-            question_token_encoding.unsqueeze(1).expand(-1, mem_size, -1, -1),
-            index=constant_span.unsqueeze(-1).expand(-1, -1, -1, question_token_encoding.size(-1)),
-            dim=2  # over `max_question_len`
-        )
-
-        # (batch_size, mem_size, embed_size)
-        # constant_span_embedding = self._question_token_span_to_memory_embedding(constant_span_embedding)
-        constant_span_embedding = torch.mean(constant_span_embedding, dim=-2)
-        constant_span_embedding = constant_span_embedding * constant_span_mask.unsqueeze(-1)
-
-        # `constant_value_embedding` consists mostly of table header embedding computed by table BERT
-        # (batch_size, mem_size, embed_size)
-        constant_value_embedding = context_encoding['constant_value_embeddings']
-        constant_value_embedding = self.constant_value_embedding_linear(constant_value_embedding)
-
-        constant_embedding = constant_value_embedding + constant_span_embedding
+        constant_encoding = context_encoding['constant_encoding']
 
         # add built-in functional operator embeddings
         # (batch_size, builtin_func_num, embed_size)
+        batch_size = constant_encoding.size(0)
         builtin_func_embedding = self.builtin_func_embeddings.weight.unsqueeze(0).expand(batch_size, -1, -1)
 
         # (batch_size, builtin_func_num + mem_size, embed_size)
         initial_memory = torch.cat(
-            [builtin_func_embedding, constant_embedding],
+            [builtin_func_embedding, constant_encoding],
             dim=1
         )[:, :self.memory_size]  # FIXME: clip to max_memory_size
 

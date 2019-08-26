@@ -327,6 +327,8 @@ class QAProgrammingEnv(Environment):
                     if (isinstance(val, str)) and val in prop_features:
                         self.id_feature_dict[id] = prop_features[val]
 
+        self.context['id_feature_dict'] = self.id_feature_dict
+
         if cache:
             self.cache = cache
         else:

@@ -19,6 +19,7 @@ from typing import List, Tuple, Any, Dict, Optional, Union
 from nsm import nn_util
 from nsm.env_factory import Environment, Trajectory
 from nsm.executor_factory import SimpleKGExecutor, TableExecutor
+from nsm.parser_module.bert_encoder import BertEncoder
 from nsm.sketch.sketch import Sketch
 from table.bert.data_model import Example
 from table.bert.model import TableBERT
@@ -46,8 +47,7 @@ def get_executor_api():
 class SketchPredictor(nn.Module):
     def __init__(
         self,
-        bert_model: BertPreTrainedModel,
-        tokenizer: BertTokenizer,
+        encoder_model: BertEncoder,
         hidden_size: int,
         token_embed_size: int,
         freeze_bert: bool = False,
@@ -56,39 +56,33 @@ class SketchPredictor(nn.Module):
     ):
         nn.Module.__init__(self)
 
-        self.bert_model = bert_model
-        self.tokenizer = tokenizer
+        self.encoder_model = encoder_model
+        self.tokenizer = encoder_model.bert_model.tokenizer
         self.hidden_size = hidden_size
         self.freeze_bert = freeze_bert
         self.use_lstm_encoder = use_lstm_encoder
-        self.use_table_bert = isinstance(bert_model, TableBERT)
-        self.use_column_encoding = self.use_table_bert
 
-        bert_output_size = bert_model.config.hidden_size
+        downstream_encoder_output_size = encoder_model.output_size  # encoder_model.config.hidden_size
 
         if use_lstm_encoder:
             self.lstm_encoder = nn.LSTM(
-                bert_output_size, hidden_size,
+                downstream_encoder_output_size, hidden_size,
                 bidirectional=True, batch_first=True
             )
 
             self.src_encoding_size = hidden_size * 2
         else:
-            self.src_encoding_projection = nn.Linear(
-                bert_output_size, hidden_size,
-                bias=False
-            )
-
-            self.column_encoding_projection = nn.Linear(
-                bert_output_size, hidden_size,
-                bias=False
-            )
-
-            self.src_encoding_size = hidden_size
+            self.src_encoding_size = downstream_encoder_output_size
 
         self.src_attention_value_to_key = nn.Linear(
             self.src_encoding_size,
             hidden_size, bias=False
+        )
+
+        self.column_encoding_with_feature = nn.Linear(
+            self.src_encoding_size + self.encoder_model.column_feature_num,
+            self.src_encoding_size,
+            bias=False
         )
 
         self.column_attention_value_to_key = nn.Linear(
@@ -97,7 +91,7 @@ class SketchPredictor(nn.Module):
         )
 
         self.decoder_init_linear = nn.Linear(
-            self.src_encoding_size,
+            self.encoder_model.bert_model.config.hidden_size,
             self.hidden_size
         )
 
@@ -106,12 +100,13 @@ class SketchPredictor(nn.Module):
             hidden_size
         )
 
-        context_vec_size = self.src_encoding_size * 2 \
-            if self.use_table_bert \
-            else self.src_encoding_size
+        self.h_and_ctx_q_linear = nn.Linear(
+            hidden_size + self.src_encoding_size, self.src_encoding_size,
+            bias=False
+        )
 
         self.decoder_att_vec_linear = nn.Linear(
-            hidden_size + context_vec_size,
+            hidden_size + self.src_encoding_size,
             self.hidden_size,
             bias=False
         )
@@ -148,21 +143,19 @@ class SketchPredictor(nn.Module):
         print('Init sketch generator weights')
 
         def _init_weights(_module):
-            initializer_range = self.bert_model.config.initializer_range
+            initializer_range = self.encoder_model.bert_model.config.initializer_range
 
             if isinstance(_module, (nn.Linear, nn.Embedding)):
                 _module.weight.data.normal_(mean=0.0, std=initializer_range)
             if isinstance(_module, nn.Linear) and _module.bias is not None:
                 _module.bias.data.zero_()
 
-        for module in [
-            self.src_encoding_projection, self.column_encoding_projection,
-            self.src_attention_value_to_key, self.column_attention_value_to_key,
-            self.decoder_lstm,
-            self.decoder_att_vec_linear, self.decoder_init_linear,
-            self.readout, self.sketch_token_embedding
-        ]:
-            module.apply(_init_weights)
+        for module_name, module in self.named_modules():
+            if 'encoder_model' not in module_name:
+                # print(module_name)
+                module.apply(_init_weights)
+
+        torch.nn.init.eye_(self.column_encoding_with_feature.weight)
 
         # for m_name, module in self.named_modules():
         #     if 'encoder_model' not in m_name:
@@ -195,15 +188,23 @@ class SketchPredictor(nn.Module):
                         table_bert_config=json.load(open(params['table_bert_config_file'])),
                         column_representation=params['column_representation']
                     )
-
-            tokenizer = bert_model.tokenizer
         else:
             bert_model = BertModel.from_pretrained(params['bert_model'])
-            tokenizer = BertTokenizer.from_pretrained(params['bert_model'])
+
+        encoder_config = dict(config)
+        downstream_encoder = BertEncoder(
+            bert_model,
+            output_size=params['sketch_decoder_hidden_size'],
+            question_feat_size=config['n_en_input_features'],
+            builtin_func_num=config['builtin_func_num'],
+            memory_size=config['memory_size'],
+            column_feature_num=config['n_de_output_features'],
+            dropout=config['dropout'],
+            config=encoder_config
+        )
 
         model = cls(
-            bert_model,
-            tokenizer,
+            downstream_encoder,
             hidden_size=params['sketch_decoder_hidden_size'],
             token_embed_size=params['sketch_decoder_token_embed_size'],
             freeze_bert=params['sketch_decoder_freeze_bert'],
@@ -234,6 +235,8 @@ class SketchPredictor(nn.Module):
         # h_t: (batch_size, hidden_size)
         h_t, cell_t = self.decoder_lstm(x, h_tm1)
 
+        # two step attention, first we attend to the question tokens,
+        # then we attend to the columns and other memory values
         # (batch_size, question_len, encoding_size)
         ctx_q_t, alpha_q_t = nn_util.dot_prod_attention(
             query=h_t,
@@ -242,61 +245,29 @@ class SketchPredictor(nn.Module):
             entry_masks=src_encodings['mask']
         )
 
+        # (batch_size, hidden_size)
+        att_q_t = torch.tanh(self.h_and_ctx_q_linear(
+            torch.cat([h_t, ctx_q_t], dim=-1)))
+
         # (batch_size, column_num, encoding_size)
         ctx_column_t, alpha_column_t = nn_util.dot_prod_attention(
-            query=h_t,
+            query=att_q_t,
             keys=column_encodings['key'],
             values=column_encodings['value'],
             entry_masks=column_encodings['mask']
         )
 
-        # (batch_size, context_vector_size)
-        ctx_t = torch.cat([ctx_q_t, ctx_column_t], dim=-1)
+        # # (batch_size, context_vector_size)
+        # ctx_t = torch.cat([ctx_q_t, ctx_column_t], dim=-1)
 
-        att_t = torch.tanh(self.decoder_att_vec_linear(torch.cat([h_t, ctx_t], 1)))
+        att_t = torch.tanh(self.decoder_att_vec_linear(torch.cat([h_t, ctx_column_t + att_q_t], 1)))
         att_t = self.dropout(att_t)
 
         return (h_t, cell_t), att_t
 
-    def get_bert_input(self, questions: List[Any]):
-        batch_size = len(questions)
-        batch_token_ids = [
-            self.tokenizer.convert_tokens_to_ids(['[CLS]'] + example + ['[SEP]'])
-            for example
-            in questions
-        ]
-
-        max_sequence_len = max(len(x) for x in batch_token_ids)
-        input_array = np.zeros((batch_size, max_sequence_len), dtype=np.int64)
-        mask_array = np.zeros((batch_size, max_sequence_len), dtype=np.float32)
-        segment_array = np.zeros((batch_size, max_sequence_len), dtype=np.int64)
-
-        for i in range(batch_size):
-            seq_len = len(batch_token_ids[i])
-            input_array[i, :seq_len] = batch_token_ids[i]
-            mask_array[i, :seq_len] = 1
-
-        bert_input = {
-            'input_ids': torch.tensor(input_array, device=self.device),
-            'segment_ids': torch.tensor(segment_array, device=self.device),
-            'attention_mask': torch.tensor(mask_array, device=self.device)
-        }
-
-        return bert_input
-
-    def to_tensor_dict(self, env_contexts: List[Dict], sketches: List[Sketch] = None, context_encoding: Dict = None):
+    def to_tensor_dict(self, env_contexts: List[Dict], sketches: List[Sketch] = None):
         batch_size = len(env_contexts)
         tensor_dict = {}
-
-        if self.use_table_bert:
-            if context_encoding is None:
-                tensor_dict['bert_input'] = [
-                    Example(question=e['question_tokens'], table=e['table'])
-                    for e in env_contexts
-                ]
-        else:
-            bert_input = self.get_bert_input(env_contexts)
-            tensor_dict['bert_input'] = bert_input
 
         if sketches is not None:
             max_sketch_len = max(2 + len(sketch.operators) for sketch in sketches)
@@ -322,14 +293,14 @@ class SketchPredictor(nn.Module):
         return tensor_dict
 
     def forward(self, env_contexts: List[Dict], sketches: List[Sketch], context_encoding: Dict = None):
-        tensor_dict = self.to_tensor_dict(
-            env_contexts, sketches, context_encoding)
+        prediction_target = self.to_tensor_dict(
+            env_contexts, sketches)
 
         # (batch_size, sequence_len, encoding_size)
         # (batch_size, max_column_len, encoding_size)
-        src_encodings, column_encodings, decoder_init_state = self.encode(tensor_dict, context_encoding)
+        src_encodings, column_encodings, decoder_init_state = self.encode(env_contexts, context_encoding)
 
-        tgt_sketch_token_ids = tensor_dict['tgt_sketch_token_ids']
+        tgt_sketch_token_ids = prediction_target['tgt_sketch_token_ids']
 
         # (batch_size, sketch_len - 1, )
         att_vecs = self.decode(
@@ -350,7 +321,7 @@ class SketchPredictor(nn.Module):
             sketch_token_prob,
             index=tgt_sketch_token_ids[:, 1:].unsqueeze(-1),
             dim=-1,
-        ).squeeze(-1) * tensor_dict['tgt_mask'][:, 1:]
+        ).squeeze(-1) * prediction_target['tgt_mask'][:, 1:]
 
         sketch_prob = tgt_sketch_token_prob.sum(dim=-1)
 
@@ -376,53 +347,59 @@ class SketchPredictor(nn.Module):
 
         return sketch_log_prob
 
-    def encode(self, tensor_dict: Dict, context_encoding: Dict = None):
-        if self.use_table_bert:
-            if context_encoding is None:
-                question_encoding, table_column_encoding, info = self.bert_model.encode(
-                    tensor_dict['bert_input'])
+    def encode(self, env_contexts: List, context_encoding: Dict = None):
+        if context_encoding is None:
+            context_encoding = self.encoder_model.encode(env_contexts)
 
-                context_encoding = {
-                    'question_encoding': question_encoding,
-                    'column_encoding': table_column_encoding,
-                }
-                context_encoding.update(info['tensor_dict'])
+        src_encodings = {
+            'value': context_encoding['question_encoding'],
+            'key': context_encoding['question_encoding_att_linear'],
+            'mask': context_encoding['question_mask']
+        }
 
-            if self.freeze_bert:
-                context_encoding['question_encoding'] = context_encoding['question_encoding'].detach()
-                context_encoding['column_encoding'] = context_encoding['column_encoding'].detach()
+        column_encoding_var = context_encoding['constant_encoding']
 
-            src_encoding_var = self.src_encoding_projection(
-                context_encoding['question_encoding'])
+        # add output features here!
+        output_features = np.zeros((
+            len(env_contexts),
+            self.encoder_model.memory_size - self.encoder_model.builtin_func_num,
+            self.encoder_model.column_feature_num),
+            dtype=np.float32
+        )
 
-            src_encodings = {
-                'value': src_encoding_var,
-                'key': self.src_attention_value_to_key(
-                    src_encoding_var),
-                'mask': context_encoding['question_token_mask']
-            }
+        for i, env_context in enumerate(env_contexts):
+            mem_id_feat_dict = env_context['id_feature_dict']
+            # feat_num = len(next(mem_id_feat_dict.values()))
+            constant_val_id_start = self.encoder_model.builtin_func_num
+            # constant_val_num = len(mem_id_feat_dict) - self.encoder_model.builtin_func_num
 
-            column_encoding_var = self.column_encoding_projection(
-                context_encoding['column_encoding'])
+            output_features[i, :] = [
+                mem_id_feat_dict[mem_idx]
+                for mem_idx
+                in range(constant_val_id_start, self.encoder_model.memory_size)
+            ]
+        output_features = torch.from_numpy(output_features).to(self.device)
+        column_encoding_var = torch.tanh(self.column_encoding_with_feature(
+            torch.cat([column_encoding_var, output_features], dim=-1)))
 
-            column_encodings = {
-                'value': column_encoding_var,
-                'key': self.column_attention_value_to_key(
-                    column_encoding_var),
-                'mask': context_encoding['column_mask']
-            }
+        column_encodings = {
+            'value': column_encoding_var,
+            'key': self.column_attention_value_to_key(
+                column_encoding_var),
+            'mask': context_encoding['constant_mask']
+        }
 
-            decoder_state_init_vec = src_encodings['value'][:, 0]  # encoding of the [CLS] label
-        else:
-            src_encodings, decoder_state_init_vec = self._encode(**tensor_dict)
-            column_encodings = None
+        # if self.freeze_bert:
+        #     context_encoding['question_encoding'] = context_encoding['question_encoding'].detach()
+        #     context_encoding['column_encoding'] = context_encoding['column_encoding'].detach()
 
+        decoder_state_init_vec = context_encoding['cls_encoding']  # encoding of the [CLS] label
         decoder_init_state = self.decoder_init(decoder_state_init_vec)
 
         return src_encodings, column_encodings, decoder_init_state
 
     def _encode(self, input_ids, segment_ids, attention_mask):
-        bert_sequence_output, _ = self.bert_model(
+        bert_sequence_output, _ = self.encoder_model(
             input_ids,
             segment_ids,
             attention_mask,
@@ -471,7 +448,7 @@ class SketchPredictor(nn.Module):
     def decoder_init(
         self,
         init_vec: torch.Tensor
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         cell_0 = self.decoder_init_linear(init_vec)
         state_0 = torch.tanh(cell_0)
 
@@ -525,16 +502,8 @@ class SketchPredictor(nn.Module):
         # }
         # context_encoding.update(info['tensor_dict'])
 
-        tensor_dict = self.to_tensor_dict(
-            [
-                env.context
-                for env in envs
-            ],
-            sketches=None,
-            context_encoding=None
-        )
-
-        src_encodings, column_encodings, decoder_init_state = self.encode(tensor_dict)
+        env_context = [env.context for env in envs]
+        src_encodings, column_encodings, decoder_init_state = self.encode(env_context)
 
         return self.beam_search(envs, src_encodings, column_encodings, decoder_init_state, beam_size=K)
 
@@ -806,7 +775,7 @@ class SketchManagerTrainer(object):
         else:
             bert_params = list([
                 (p_name, p)
-                for (p_name, p) in model.bert_model.named_parameters()
+                for (p_name, p) in model.encoder_model.named_parameters()
                 if not any(pn in p_name for pn in no_grad) and p.requires_grad])
             no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
 

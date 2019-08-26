@@ -62,16 +62,18 @@ class PGAgent(nn.Module):
 
     def compute_trajectory_actions_prob(self, trajectories: List[Trajectory], return_info=False) -> torch.Tensor:
         contexts = [traj.context for traj in trajectories]
+        sketches = [Sketch(traj.program) for traj in trajectories]
+
+        sketch_prob = self.sketch_predictor(
+            contexts,
+            sketches
+        )
+
         context_encoding = self.encoder.encode(contexts)
 
         batched_observation_seq, tgt_actions_info = Trajectory.to_batched_sequence_tensors(
             trajectories, self.memory_size)
 
-        sketches = [Sketch(traj.program) for traj in trajectories]
-        sketch_prob = self.sketch_predictor(
-            contexts,
-            sketches
-        )
         sketch_encoding = self.sketch_encoder(sketches)
 
         state_tm1 = init_state = self.decoder.get_initial_state(context_encoding, sketch_encoding)
