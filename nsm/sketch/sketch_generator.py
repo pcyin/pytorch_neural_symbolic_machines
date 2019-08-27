@@ -106,7 +106,7 @@ class SketchPredictor(nn.Module):
         )
 
         self.decoder_att_vec_linear = nn.Linear(
-            hidden_size + self.src_encoding_size,
+            hidden_size + self.src_encoding_size * 2,
             self.hidden_size,
             bias=False
         )
@@ -245,22 +245,31 @@ class SketchPredictor(nn.Module):
             entry_masks=src_encodings['mask']
         )
 
-        # (batch_size, hidden_size)
-        att_q_t = torch.tanh(self.h_and_ctx_q_linear(
-            torch.cat([h_t, ctx_q_t], dim=-1)))
+        # # (batch_size, hidden_size)
+        # att_q_t = torch.tanh(self.h_and_ctx_q_linear(
+        #     torch.cat([h_t, ctx_q_t], dim=-1)))
+        #
+        # # (batch_size, column_num, encoding_size)
+        # ctx_column_t, alpha_column_t = nn_util.dot_prod_attention(
+        #     query=att_q_t,
+        #     keys=column_encodings['key'],
+        #     values=column_encodings['value'],
+        #     entry_masks=column_encodings['mask']
+        # )
 
         # (batch_size, column_num, encoding_size)
         ctx_column_t, alpha_column_t = nn_util.dot_prod_attention(
-            query=att_q_t,
+            query=h_t,
             keys=column_encodings['key'],
             values=column_encodings['value'],
             entry_masks=column_encodings['mask']
         )
 
         # # (batch_size, context_vector_size)
-        # ctx_t = torch.cat([ctx_q_t, ctx_column_t], dim=-1)
+        ctx_t = torch.cat([ctx_q_t, ctx_column_t], dim=-1)
 
-        att_t = torch.tanh(self.decoder_att_vec_linear(torch.cat([h_t, ctx_column_t + att_q_t], 1)))
+        # att_t = torch.tanh(self.decoder_att_vec_linear(torch.cat([h_t, ctx_column_t + att_q_t], 1)))
+        att_t = torch.tanh(self.decoder_att_vec_linear(torch.cat([h_t, ctx_t], 1)))
         att_t = self.dropout(att_t)
 
         return (h_t, cell_t), att_t
