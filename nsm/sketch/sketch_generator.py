@@ -366,7 +366,8 @@ class SketchPredictor(nn.Module):
             'mask': context_encoding['question_mask']
         }
 
-        column_encoding_var = context_encoding['constant_encoding']
+        # column_encoding_var = context_encoding['constant_encoding']
+        column_encoding_var = context_encoding['column_encoding']
 
         # add output features here!
         output_features = np.zeros((
@@ -388,14 +389,14 @@ class SketchPredictor(nn.Module):
                 in range(constant_val_id_start, self.encoder_model.memory_size)
             ]
         output_features = torch.from_numpy(output_features).to(self.device)
-        column_encoding_var = torch.tanh(self.column_encoding_with_feature(
-            torch.cat([column_encoding_var, output_features], dim=-1)))
+        # column_encoding_var = torch.tanh(self.column_encoding_with_feature(
+        #     torch.cat([column_encoding_var, output_features], dim=-1)))
 
         column_encodings = {
             'value': column_encoding_var,
             'key': self.column_attention_value_to_key(
                 column_encoding_var),
-            'mask': context_encoding['constant_mask']
+            'mask': context_encoding['column_mask'] # context_encoding['constant_mask']
         }
 
         # if self.freeze_bert:
