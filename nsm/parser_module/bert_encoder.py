@@ -224,9 +224,9 @@ class BertEncoder(EncoderBase):
 
                 table_column_encoding = type_fused_column_encoding
 
-            # canonical_column_mask = table_column_mask
-            # table_column_mask = new_tensor(raw_column_mask)
-            table_column_encoding = table_column_encoding * new_tensor(raw_column_mask).unsqueeze(-1)
+            canonical_column_mask = table_column_mask
+            table_column_mask = new_tensor(raw_column_mask)
+            table_column_encoding = table_column_encoding * table_column_mask.unsqueeze(-1)
             max_column_num = table_column_encoding.size(1)
 
         # (batch_size, max_column_num, encoding_size)
