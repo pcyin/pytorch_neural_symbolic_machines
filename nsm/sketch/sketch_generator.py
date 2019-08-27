@@ -420,8 +420,7 @@ class SketchPredictor(nn.Module):
             'mask': context_encoding['question_mask']
         }
 
-        # column_encoding_var = context_encoding['constant_encoding']
-        column_encoding_var = self.column_encoding_projection(context_encoding['canonical_column_encoding'])
+        column_encoding_var = context_encoding['constant_encoding']
 
         # add output features here!
         output_features = np.zeros((
@@ -450,7 +449,7 @@ class SketchPredictor(nn.Module):
             'value': column_encoding_var,
             'key': self.column_attention_value_to_key(
                 column_encoding_var),
-            'mask': context_encoding['canonical_column_mask']  # context_encoding['constant_mask']
+            'mask': context_encoding['column_mask']
         }
 
         # if self.freeze_bert:
