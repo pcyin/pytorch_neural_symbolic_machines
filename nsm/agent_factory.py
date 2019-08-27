@@ -462,7 +462,14 @@ class PGAgent(nn.Module):
         context_encoding = self.encode(env_context)
 
         # List[List * env_num]
-        nested_hyp_sketches = self.sketch_predictor.get_sketches(environments, K=5)
+        nested_hyp_sketches = []
+        if constraint_sketches:
+            # print('decoding using predefined sketches', file=sys.stdout)
+            for env in environments:
+                nested_hyp_sketches.append(
+                    constraint_sketches.get(env.name, []))
+        else:
+            nested_hyp_sketches = self.sketch_predictor.get_sketches(environments, K=5)
 
         if self.log:
             print(f"Beam Search for questions:", file=self.log)
