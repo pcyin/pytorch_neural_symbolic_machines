@@ -7,11 +7,13 @@ from torch import nn as nn
 class EncoderBase(nn.Module):
     def __init__(self,
                  output_size: int,
-                 max_variable_num_on_memory: int):
+                 builtin_func_num: int,
+                 memory_size: int):
         nn.Module.__init__(self)
 
         self.output_size = output_size
-        self.max_variable_num_on_memory = max_variable_num_on_memory
+        self.builtin_func_num = builtin_func_num
+        self.memory_size = memory_size
 
     def encode(self, examples: List) -> Dict:
         raise NotImplementedError

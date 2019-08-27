@@ -20,17 +20,19 @@ class BertEncoder(EncoderBase):
         output_size: int,
         config: Dict,
         question_feat_size: int,
-        max_variable_num_on_memory: int,
+        builtin_func_num: int,
+        memory_size: int,
+        column_feature_num: int,
         dropout: float = 0.
     ):
-        EncoderBase.__init__(self, output_size, max_variable_num_on_memory)
-
-        self.bert_model = table_bert_model
-        self.question_feat_size = question_feat_size
-        self.max_variable_num_on_memory = max_variable_num_on_memory
-        self.dropout = nn.Dropout(dropout)
+        EncoderBase.__init__(self, output_size, builtin_func_num, memory_size)
 
         self.config = config
+        self.bert_model = table_bert_model
+        self.question_feat_size = question_feat_size
+        self.dropout = nn.Dropout(dropout)
+        self.max_variable_num_on_memory = memory_size - builtin_func_num
+        self.column_feature_num = column_feature_num
 
         self.bert_output_project = nn.Linear(
             self.bert_model.output_size + self.question_feat_size,
@@ -57,6 +59,8 @@ class BertEncoder(EncoderBase):
                 self.bert_model.output_size, self.output_size, bias=False
             )
 
+        self.constant_value_embedding_linear = lambda x: x
+
         self.init_weights()
 
     def init_weights(self):
@@ -77,35 +81,38 @@ class BertEncoder(EncoderBase):
             module.apply(_init_weights)
 
     @classmethod
-    def build(cls, config):
-        tb_path = config.get('table_bert_model')
-        tb_state_dict = None
+    def build(cls, config, table_bert_model=None):
+        if table_bert_model is None:
+            tb_path = config.get('table_bert_model')
+            tb_state_dict = None
 
-        if tb_path:
-            print(f'Loading table BERT model {tb_path}', file=sys.stderr)
-            tb_state_dict = torch.load(tb_path, map_location='cpu')
-            tb_path = Path(tb_path)
-            tb_config = json.load((tb_path.parent / 'tb_config.json').open())
+            if tb_path:
+                print(f'Loading table BERT model {tb_path}', file=sys.stderr)
+                tb_state_dict = torch.load(tb_path, map_location='cpu')
+                tb_path = Path(tb_path)
+                tb_config = json.load((tb_path.parent / 'tb_config.json').open())
 
-            # the bert model config is from the training config file
-            bert_model = tb_config['bert_model'] = json.load((tb_path.parent / 'config.json').open())['bert_model']
-        else:
-            tb_config = json.load(open(config['table_bert_config_file']))
-            bert_model = config['bert_model']
+                # the bert model config is from the training config file
+                table_bert_model = tb_config['bert_model'] = json.load((tb_path.parent / 'config.json').open())['bert_model']
+            else:
+                tb_config = json.load(open(config['table_bert_config_file']))
+                table_bert_model = config['bert_model']
 
-        bert_model = TableBERT.from_pretrained(
-            bert_model,
-            state_dict=tb_state_dict,
-            tokenizer=BertTokenizer.from_pretrained(config['bert_model']),
-            table_bert_config=tb_config,
-            column_representation=config.get('column_representation', 'mean_pool')
-        )
+            table_bert_model = TableBERT.from_pretrained(
+                table_bert_model,
+                state_dict=tb_state_dict,
+                tokenizer=BertTokenizer.from_pretrained(config['bert_model']),
+                table_bert_config=tb_config,
+                column_representation=config.get('column_representation', 'mean_pool')
+            )
 
         return cls(
-            bert_model,
+            table_bert_model,
             output_size=config['hidden_size'],
             question_feat_size=config['n_en_input_features'],
-            max_variable_num_on_memory=config['memory_size'] - config['builtin_func_num'],
+            builtin_func_num=config['builtin_func_num'],
+            memory_size=config['memory_size'],
+            column_feature_num=config['n_de_output_features'],
             dropout=config['dropout'],
             config=config
         )
@@ -168,8 +175,8 @@ class BertEncoder(EncoderBase):
         question_mask = table_bert_encoding['question_token_mask'][:, 1:]
         cls_encoding = table_bert_encoding['question_encoding'][:, 0]
 
-        table_column_encoding = table_bert_encoding['column_encoding']
-        table_column_mask = table_bert_encoding['column_mask']
+        canonical_column_encoding = table_column_encoding = table_bert_encoding['column_encoding']
+        canonical_column_mask = table_column_mask = table_bert_encoding['column_mask']
 
         if self.question_feat_size > 0:
             question_encoding = torch.cat([
@@ -217,13 +224,13 @@ class BertEncoder(EncoderBase):
 
                 table_column_encoding = type_fused_column_encoding
 
-            table_column_encoding = table_column_encoding * new_tensor(raw_column_mask).unsqueeze(-1)
-
+            canonical_column_mask = table_column_mask
+            table_column_mask = new_tensor(raw_column_mask)
+            table_column_encoding = table_column_encoding * table_column_mask.unsqueeze(-1)
             max_column_num = table_column_encoding.size(1)
 
         # (batch_size, max_column_num, encoding_size)
         table_column_encoding = self.bert_table_output_project(table_column_encoding)
-        # table_column_mask = info['tensor_dict']['column_mask']
 
         if max_column_num < constant_value_num:
             constant_value_embedding = torch.cat([
@@ -234,17 +241,61 @@ class BertEncoder(EncoderBase):
         else:
             constant_value_embedding = table_column_encoding[:, :constant_value_num, :]
 
+        constant_encoding, constant_mask = self.get_constant_encoding(
+            question_encoding, batched_context['constant_spans'], constant_value_embedding, table_column_mask)
+
         context_encoding = {
             'batch_size': len(env_context),
             'question_encoding': question_encoding,
-            'column_encoding': table_column_encoding,
-            'column_mask': table_column_mask,
-            'cls_encoding': cls_encoding,
             'question_mask': question_mask,
             'question_encoding_att_linear': question_encoding_att_linear,
-            'constant_value_embeddings': constant_value_embedding,
-            'constant_spans': batched_context['constant_spans'],
-            'table_bert_encoding': table_bert_encoding
+            'column_encoding': table_column_encoding,
+            'column_mask': table_column_mask,
+            'canonical_column_encoding': canonical_column_encoding,
+            'canonical_column_mask': canonical_column_mask,
+            'cls_encoding': cls_encoding,
+            'table_bert_encoding': table_bert_encoding,
+            'constant_encoding': constant_encoding,
+            'constant_mask': constant_mask
         }
 
         return context_encoding
+
+    def get_constant_encoding(self, question_token_encoding, constant_span, constant_value_embedding, column_mask):
+        """
+        Args:
+            question_token_encoding: (batch_size, max_question_len, encoding_size)
+            constant_span: (batch_size, mem_size, 2)
+            constant_value_embedding: (batch_size, constant_value_num, embed_size)
+            column_mask: (batch_size, constant_value_num)
+        """
+        # (batch_size, mem_size)
+        constant_span_mask = torch.ge(constant_span, 0)[:, :, 0].float()
+
+        # mask out entries <= 0
+        constant_span = constant_span * constant_span_mask.unsqueeze(-1).long()
+
+        constant_span_size = constant_span.size()
+        mem_size = constant_span_size[1]
+        batch_size = question_token_encoding.size(0)
+
+        # (batch_size, mem_size, 2, embed_size)
+        constant_span_embedding = torch.gather(
+            question_token_encoding.unsqueeze(1).expand(-1, mem_size, -1, -1),
+            index=constant_span.unsqueeze(-1).expand(-1, -1, -1, question_token_encoding.size(-1)),
+            dim=2  # over `max_question_len`
+        )
+
+        # (batch_size, mem_size, embed_size)
+        # constant_span_embedding = self._question_token_span_to_memory_embedding(constant_span_embedding)
+        constant_span_embedding = torch.mean(constant_span_embedding, dim=-2)
+        constant_span_embedding = constant_span_embedding * constant_span_mask.unsqueeze(-1)
+
+        # `constant_value_embedding` consists mostly of table header embedding computed by table BERT
+        # (batch_size, constant_value_num, embed_size)
+        constant_value_embedding = self.constant_value_embedding_linear(constant_value_embedding)
+
+        constant_encoding = constant_value_embedding + constant_span_embedding
+        constant_mask = (constant_span_mask.byte() | column_mask.byte()).float()
+
+        return constant_encoding, constant_mask
