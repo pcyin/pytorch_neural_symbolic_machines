@@ -423,9 +423,6 @@ class PGAgent(nn.Module):
 
     def new_beam_search(self, environments, beam_size, use_cache=False, return_list=False,
                         constraint_sketches=None, strict_constraint_on_sketches=False, force_sketch_coverage=False):
-        if strict_constraint_on_sketches or force_sketch_coverage:
-            assert constraint_sketches is not None
-
         # if already explored everything, then don't explore this environment anymore.
         if use_cache:
             # if already explored everything, then don't explore this environment anymore.
@@ -674,32 +671,34 @@ class PGAgent(nn.Module):
                             new_hyp_scores.append(_hyp.score)
 
                 new_beam_size = 0
-                # if force_sketch_coverage:
-                #     env_new_beam_not_covered_sketches = set(constraint_sketches[env_name])
+                if force_sketch_coverage:
+                    env_new_beam_not_covered_sketches = set(hyp.sketch for hyp in beam)
 
                 for cand_hyp in all_candidates:
                     if new_beam_size < beam_size:
                         _add_hypothesis_to_new_beam(cand_hyp)
 
-                        # if force_sketch_coverage:
-                        #     cand_hyp_covered_sketches = set(
-                        #         sketch
-                        #         for sketch
-                        #         in env_new_beam_not_covered_sketches
-                        #         if sketch.is_compatible_with_hypothesis(cand_hyp))
-                        #     env_new_beam_not_covered_sketches -= cand_hyp_covered_sketches
+                        if force_sketch_coverage:
+                            cand_hyp_covered_sketches = set(
+                                sketch
+                                for sketch
+                                in env_new_beam_not_covered_sketches
+                                if sketch == cand_hyp.sketch
+                            )
+                            env_new_beam_not_covered_sketches -= cand_hyp_covered_sketches
 
                     # make sure each sketch has at least one candidate hypothesis in the new beam
-                    # elif force_sketch_coverage and env_new_beam_not_covered_sketches:
-                    #     cand_hyp_covered_sketches = set(
-                    #         sketch
-                    #         for sketch
-                    #         in env_new_beam_not_covered_sketches
-                    #         if sketch.is_compatible_with_hypothesis(cand_hyp))
-                    #
-                    #     if cand_hyp_covered_sketches:
-                    #         _add_hypothesis_to_new_beam(cand_hyp)
-                    #         env_new_beam_not_covered_sketches -= cand_hyp_covered_sketches
+                    elif force_sketch_coverage and env_new_beam_not_covered_sketches:
+                        cand_hyp_covered_sketches = set(
+                            sketch
+                            for sketch
+                            in env_new_beam_not_covered_sketches
+                            if sketch == cand_hyp.sketch
+                        )
+
+                        if cand_hyp_covered_sketches:
+                            _add_hypothesis_to_new_beam(cand_hyp)
+                            env_new_beam_not_covered_sketches -= cand_hyp_covered_sketches
 
                     new_beam_size += 1
 
