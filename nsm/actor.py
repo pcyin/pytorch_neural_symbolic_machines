@@ -424,9 +424,9 @@ class Actor(torch_mp.Process):
                                 beam_size=config['n_explore_samples'],
                                 use_cache=config['use_cache'],
                                 return_list=True,
-                                constraint_sketches=constraint_sketches,
-                                strict_constraint_on_sketches=strict_constraint_on_sketches,
-                                force_sketch_coverage=force_sketch_coverage
+                                constraint_sketches=None,
+                                strict_constraint_on_sketches=False,
+                                force_sketch_coverage=False
                             )
                         t2 = time.time()
 
