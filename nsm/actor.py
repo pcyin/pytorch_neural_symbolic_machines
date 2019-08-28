@@ -344,7 +344,7 @@ class Actor(torch_mp.Process):
         log_dir.mkdir(exist_ok=True, parents=True)
 
         debug_file = (log_dir / f'debug.actor{self.actor_id}.log').open('w')
-        self.agent.log = debug_file
+        # self.agent.log = debug_file
 
         with torch.no_grad():
             while True:

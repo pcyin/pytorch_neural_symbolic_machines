@@ -584,8 +584,9 @@ class PGAgent(nn.Module):
                         if self.log:
                             print(f"\tvariable grounding", file=self.log)
 
+                        valid_action_indices = prev_hyp.env.valid_actions
                         _cont_action_scores = beam_new_cont_scores[prev_hyp_id][
-                            prev_hyp.env.obs[-1].valid_action_indices].cpu()
+                            valid_action_indices].cpu()
 
                         for rel_action_id, new_hyp_score in enumerate(_cont_action_scores):
                             abs_action_id = prev_hyp.env.obs[-1].valid_action_indices[rel_action_id]
