@@ -739,7 +739,7 @@ class PGAgent(nn.Module):
         else:
             samples_list = []
             for _hyps in completed_hyps.values():
-                samples = [Sample(trajectory=Trajectory.from_environment(hyp.env), prob=hyp.score) for hyp in _hyps]
+                samples = [Sample(trajectory=Trajectory.from_environment(hyp.env), prob=hyp.score, sketch=hyp.sketch) for hyp in _hyps]
                 samples_list.extend(samples)
 
             return samples_list

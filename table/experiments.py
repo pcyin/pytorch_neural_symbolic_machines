@@ -1,5 +1,6 @@
 """
 Pytorch implementation of neural symbolic machines
+
 Usage:
     experiments.py train --work-dir=<dir> --config=<file> [options]
     experiments.py test --model=<file> --test-file=<file> [options]
