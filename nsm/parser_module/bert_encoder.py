@@ -175,8 +175,8 @@ class BertEncoder(EncoderBase):
         question_mask = table_bert_encoding['question_token_mask'][:, 1:]
         cls_encoding = table_bert_encoding['question_encoding'][:, 0]
 
-        table_column_encoding = table_bert_encoding['column_encoding']
-        table_column_mask = table_bert_encoding['column_mask']
+        canonical_column_encoding = table_column_encoding = table_bert_encoding['column_encoding']
+        canonical_column_mask = table_column_mask = table_bert_encoding['column_mask']
 
         if self.question_feat_size > 0:
             question_encoding = torch.cat([
@@ -251,6 +251,8 @@ class BertEncoder(EncoderBase):
             'question_encoding_att_linear': question_encoding_att_linear,
             'column_encoding': table_column_encoding,
             'column_mask': table_column_mask,
+            'canonical_column_encoding': canonical_column_encoding,
+            'canonical_column_mask': canonical_column_mask,
             'cls_encoding': cls_encoding,
             'table_bert_encoding': table_bert_encoding,
             'constant_encoding': constant_encoding,

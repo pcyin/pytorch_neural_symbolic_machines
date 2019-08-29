@@ -570,9 +570,12 @@ class SearchCache(object):
 
 
 class Sample(object):
-    def __init__(self, trajectory: Trajectory, prob: Union[float, torch.Tensor]):
+    def __init__(self, trajectory: Trajectory, prob: Union[float, torch.Tensor], **kwargs):
         self.trajectory = trajectory
         self.prob = prob
+
+        for field, value in kwargs.items():
+            setattr(self, field, value)
 
     def to(self, device: torch.device):
         for ob in self.trajectory.observations:

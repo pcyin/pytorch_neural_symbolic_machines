@@ -52,7 +52,9 @@ class SketchPredictor(nn.Module):
         token_embed_size: int,
         freeze_bert: bool = False,
         use_lstm_encoder: bool = False,
-        dropout: float = 0.2
+        dropout: float = 0.2,
+        use_canonical_column_representation: bool = False,
+        use_column_feature: bool = False
     ):
         nn.Module.__init__(self)
 
@@ -61,6 +63,8 @@ class SketchPredictor(nn.Module):
         self.hidden_size = hidden_size
         self.freeze_bert = freeze_bert
         self.use_lstm_encoder = use_lstm_encoder
+        self.use_canonical_column_representation = use_canonical_column_representation
+        self.use_column_feature = use_column_feature
 
         downstream_encoder_output_size = encoder_model.output_size  # encoder_model.config.hidden_size
 
@@ -79,11 +83,23 @@ class SketchPredictor(nn.Module):
             hidden_size, bias=False
         )
 
-        self.column_encoding_with_feature = nn.Linear(
-            self.src_encoding_size + self.encoder_model.column_feature_num,
+        col_feat_num = self.encoder_model.column_feature_num if self.use_column_feature else 0
+
+        if use_canonical_column_representation:
+            column_proj_in_feat = self.encoder_model.bert_model.config.hidden_size + col_feat_num
+        else:
+            column_proj_in_feat = self.src_encoding_size + col_feat_num
+
+        self.column_encoding_projection = nn.Linear(
+            column_proj_in_feat,
             self.src_encoding_size,
             bias=False
         )
+
+        # self.column_encoding_projection = nn.Linear(
+        #     self.encoder_model.bert_model.config.hidden_size, self.src_encoding_size,
+        #     bias=False
+        # )
 
         self.column_attention_value_to_key = nn.Linear(
             self.src_encoding_size,
@@ -150,16 +166,22 @@ class SketchPredictor(nn.Module):
             if isinstance(_module, nn.Linear) and _module.bias is not None:
                 _module.bias.data.zero_()
 
-        for module_name, module in self.named_modules():
-            if 'encoder_model' not in module_name:
-                # print(module_name)
-                module.apply(_init_weights)
-
-        torch.nn.init.eye_(self.column_encoding_with_feature.weight)
-
-        # for m_name, module in self.named_modules():
-        #     if 'encoder_model' not in m_name:
+        # for module_name, module in self.named_modules():
+        #     if 'encoder_model' not in module_name:
+        #         # print(module_name)
         #         module.apply(_init_weights)
+
+        # torch.nn.init.eye_(self.column_encoding_with_feature.weight)
+
+        for module in [
+            self.column_attention_value_to_key, self.column_encoding_projection,
+            self.decoder_lstm,
+            self.decoder_att_vec_linear, self.decoder_init_linear,
+            self.readout, self.sketch_token_embedding
+        ]:
+            module.apply(_init_weights)
+
+        self.column_encoding_projection.apply(_init_weights)
 
     @property
     def device(self):
@@ -208,7 +230,9 @@ class SketchPredictor(nn.Module):
             hidden_size=params['sketch_decoder_hidden_size'],
             token_embed_size=params['sketch_decoder_token_embed_size'],
             freeze_bert=params['sketch_decoder_freeze_bert'],
-            use_lstm_encoder=params['sketch_decoder_use_lstm_encoder']
+            use_lstm_encoder=params['sketch_decoder_use_lstm_encoder'],
+            use_canonical_column_representation=params['sketch_decoder_use_canonical_column_representation'],
+            use_column_feature=params['sketch_decoder_use_column_feature']
         )
 
         return model
@@ -222,7 +246,9 @@ class SketchPredictor(nn.Module):
             'sketch_decoder_hidden_size': 256,
             'sketch_decoder_token_embed_size': 128,
             'sketch_decoder_freeze_bert': False,
-            'sketch_decoder_use_lstm_encoder': False
+            'sketch_decoder_use_lstm_encoder': False,
+            'sketch_decoder_use_canonical_column_representation': False,
+            'sketch_decoder_use_column_feature': False
         }
 
     def step(
@@ -301,13 +327,13 @@ class SketchPredictor(nn.Module):
 
         return tensor_dict
 
-    def forward(self, env_contexts: List[Dict], sketches: List[Sketch], context_encoding: Dict = None):
+    def forward(self, env_contexts: List[Dict], sketches: List[Sketch]):
         prediction_target = self.to_tensor_dict(
             env_contexts, sketches)
 
         # (batch_size, sequence_len, encoding_size)
         # (batch_size, max_column_len, encoding_size)
-        src_encodings, column_encodings, decoder_init_state = self.encode(env_contexts, context_encoding)
+        src_encodings, column_encodings, decoder_init_state = self.encode(env_contexts)
 
         tgt_sketch_token_ids = prediction_target['tgt_sketch_token_ids']
 
@@ -356,6 +382,45 @@ class SketchPredictor(nn.Module):
 
         return sketch_log_prob
 
+    def old_encode(self, env_contexts: List, context_encoding: Dict = None):
+        bert_input = [
+            Example(question=e['question_tokens'], table=e['table'])
+            for e in env_contexts
+        ]
+
+        question_encoding, table_column_encoding, info = self.encoder_model.bert_model.encode(bert_input)
+
+        context_encoding = {
+            'question_encoding': question_encoding,
+            'column_encoding': table_column_encoding,
+        }
+        context_encoding.update(info['tensor_dict'])
+
+        src_encoding_var = self.src_encoding_projection(
+            context_encoding['question_encoding'])
+
+        src_encodings = {
+            'value': src_encoding_var,
+            'key': self.src_attention_value_to_key(
+                src_encoding_var),
+            'mask': context_encoding['question_token_mask']
+        }
+
+        column_encoding_var = self.column_encoding_projection(
+            context_encoding['column_encoding'])
+
+        column_encodings = {
+            'value': column_encoding_var,
+            'key': self.column_attention_value_to_key(
+                column_encoding_var),
+            'mask': context_encoding['column_mask']
+        }
+
+        decoder_state_init_vec = question_encoding[:, 0]  # encoding of the [CLS] label
+        decoder_init_state = self.decoder_init(decoder_state_init_vec)
+
+        return src_encodings, column_encodings, decoder_init_state
+
     def encode(self, env_contexts: List, context_encoding: Dict = None):
         if context_encoding is None:
             context_encoding = self.encoder_model.encode(env_contexts)
@@ -366,37 +431,72 @@ class SketchPredictor(nn.Module):
             'mask': context_encoding['question_mask']
         }
 
-        # column_encoding_var = context_encoding['constant_encoding']
-        column_encoding_var = context_encoding['column_encoding']
+        max_column_num = context_encoding['canonical_column_encoding'].size(1) \
+            if self.use_canonical_column_representation \
+            else context_encoding['column_encoding'].size(1)
 
-        # add output features here!
-        output_features = np.zeros((
-            len(env_contexts),
-            self.encoder_model.memory_size - self.encoder_model.builtin_func_num,
-            self.encoder_model.column_feature_num),
-            dtype=np.float32
-        )
+        if self.use_column_feature:
+            # add output features here!
+            output_features = np.zeros((
+                len(env_contexts),
+                max_column_num,
+                self.encoder_model.column_feature_num),
+                dtype=np.float32
+            )
 
-        for i, env_context in enumerate(env_contexts):
-            mem_id_feat_dict = env_context['id_feature_dict']
-            # feat_num = len(next(mem_id_feat_dict.values()))
-            constant_val_id_start = self.encoder_model.builtin_func_num
-            # constant_val_num = len(mem_id_feat_dict) - self.encoder_model.builtin_func_num
+            for example_id, env_context in enumerate(env_contexts):
+                column_info = env_context['table'].header
+                mem_id_feat_dict = env_context['id_feature_dict']
+                constant_val_id_start = self.encoder_model.builtin_func_num
 
-            output_features[i, :] = [
-                mem_id_feat_dict[mem_idx]
-                for mem_idx
-                in range(constant_val_id_start, self.encoder_model.memory_size)
-            ]
-        output_features = torch.from_numpy(output_features).to(self.device)
-        # column_encoding_var = torch.tanh(self.column_encoding_with_feature(
-        #     torch.cat([column_encoding_var, output_features], dim=-1)))
+                if self.use_canonical_column_representation:
+                    canonical_column_num = len(column_info['columns'])
+                    for col_idx in range(canonical_column_num):
+                        raw_col_indices = [
+                            idx
+                            for idx, _col_idx in enumerate(column_info['raw_column_canonical_ids'])
+                            if _col_idx == col_idx
+                        ]
+                        raw_col_features = np.array([
+                            mem_id_feat_dict[constant_val_id_start + idx]
+                            for idx in raw_col_indices]
+                        )
+                        col_features = raw_col_features.max(axis=0)  # (feature_num)
+
+                        if col_idx < max_column_num:
+                            output_features[example_id, col_idx] = col_features
+                else:
+                    output_features[example_id, :] = [
+                        mem_id_feat_dict[mem_idx]
+                        for mem_idx
+                        in range(constant_val_id_start, constant_val_id_start + max_column_num)
+                    ]
+
+            output_features = torch.from_numpy(output_features).to(self.device)
+
+            if self.use_canonical_column_representation:
+                column_encoding_var = self.column_encoding_projection(torch.cat([
+                    context_encoding['canonical_column_encoding'], output_features], dim=-1))
+                column_mask = context_encoding['canonical_column_mask']
+            else:
+                column_encoding_var = self.column_encoding_projection(torch.cat([
+                    context_encoding['column_encoding'], output_features], dim=-1))
+                column_mask = context_encoding['column_mask']
+        else:
+            if self.use_canonical_column_representation:
+                column_encoding_var = self.column_encoding_projection(
+                    context_encoding['canonical_column_encoding'])
+                column_mask = context_encoding['canonical_column_mask']
+            else:
+                column_encoding_var = self.column_encoding_projection(
+                    context_encoding['column_encoding'])
+                column_mask = context_encoding['column_mask']
 
         column_encodings = {
             'value': column_encoding_var,
             'key': self.column_attention_value_to_key(
                 column_encoding_var),
-            'mask': context_encoding['column_mask'] # context_encoding['constant_mask']
+            'mask': column_mask
         }
 
         # if self.freeze_bert:

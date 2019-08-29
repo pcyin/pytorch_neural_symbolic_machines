@@ -344,7 +344,7 @@ class Actor(torch_mp.Process):
         log_dir.mkdir(exist_ok=True, parents=True)
 
         debug_file = (log_dir / f'debug.actor{self.actor_id}.log').open('w')
-        self.agent.log = debug_file
+        # self.agent.log = debug_file
 
         with torch.no_grad():
             while True:
@@ -355,13 +355,15 @@ class Actor(torch_mp.Process):
                     try:
                         # print(f'[Actor {self.actor_id}] epoch {epoch_id} batch {batch_id}', file=sys.stderr)
                         # perform sampling
+
+                        strict_constraint_on_sketches = config.get('sketch_explore_strict_constraint_on_sketch', True)
+                        force_sketch_coverage = config.get('sketch_explore_force_coverage', False)
+
                         if None:  # self.use_sketch_exploration:
                             constraint_sketches = dict()
+                            explore_beam_size = config.get('sketch_explore_beam_size', 5)
                             num_sketches_per_example = config.get('num_candidate_sketches', 5)
                             remove_explored_sketch = config.get('remove_explored_sketch', True)
-                            explore_beam_size = config.get('sketch_explore_beam_size', 5)
-                            strict_constraint_on_sketches = config.get('sketch_explore_strict_constraint_on_sketch', True)
-                            force_sketch_coverage = config.get('sketch_explore_force_coverage', False)
                             use_sketch_exploration_for_nepoch = config.get('use_sketch_exploration_for_nepoch', 10000)
                             use_trainable_sketch_manager = config.get('use_trainable_sketch_manager', False)
 
@@ -408,7 +410,6 @@ class Actor(torch_mp.Process):
                                         )
                         else:
                             constraint_sketches = None
-                            strict_constraint_on_sketches = force_sketch_coverage = False
 
                         t1 = time.time()
                         if sample_method == 'sample':
@@ -424,7 +425,7 @@ class Actor(torch_mp.Process):
                                 beam_size=config['n_explore_samples'],
                                 use_cache=config['use_cache'],
                                 return_list=True,
-                                constraint_sketches=constraint_sketches,
+                                constraint_sketches=None,
                                 strict_constraint_on_sketches=strict_constraint_on_sketches,
                                 force_sketch_coverage=force_sketch_coverage
                             )
