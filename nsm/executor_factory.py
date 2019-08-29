@@ -1128,29 +1128,29 @@ class TableExecutor(SimpleKGExecutor):
             type='primitive_function',
             value=self.diff)
 
-        func_dict['select_ge'] = dict(
-            name='select_ge',
-            args=[
-                {'types': ['entity_list']},
-                {'types': ['ordered_property']}
-            ],
-            return_type='entity_list',
-            autocomplete=self.autocomplete_comparative_select,
-            type='primitive_function',
-            value=self.select_ge
-        )
-
-        func_dict['select_less'] = dict(
-            name='select_less',
-            args=[
-                {'types': ['entity_list']},
-                {'types': ['ordered_property']}
-            ],
-            return_type='entity_list',
-            autocomplete=self.autocomplete_comparative_select,
-            type='primitive_function',
-            value=self.select_less
-        )
+        # func_dict['select_ge'] = dict(
+        #     name='select_ge',
+        #     args=[
+        #         {'types': ['entity_list']},
+        #         {'types': ['ordered_property']}
+        #     ],
+        #     return_type='entity_list',
+        #     autocomplete=self.autocomplete_comparative_select,
+        #     type='primitive_function',
+        #     value=self.select_ge
+        # )
+        #
+        # func_dict['select_less'] = dict(
+        #     name='select_less',
+        #     args=[
+        #         {'types': ['entity_list']},
+        #         {'types': ['ordered_property']}
+        #     ],
+        #     return_type='entity_list',
+        #     autocomplete=self.autocomplete_comparative_select,
+        #     type='primitive_function',
+        #     value=self.select_less
+        # )
 
         constant_dict = collections.OrderedDict()
 
