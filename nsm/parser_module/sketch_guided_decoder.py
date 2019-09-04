@@ -9,7 +9,7 @@ from nsm.parser_module.bert_decoder import BertDecoder
 from nsm.parser_module.bert_encoder import BertEncoder
 from nsm.parser_module.decoder import MultiLayerDropoutLSTMCell, DecoderState
 from nsm.parser_module.encoder import ContextEncoding
-from nsm.sketch.sketch_generator import SketchEncoding, SketchEncoder
+from nsm.sketch.sketch_predictor import SketchEncoding, SketchEncoder
 
 
 class SketchGuidedDecoderState(DecoderState):

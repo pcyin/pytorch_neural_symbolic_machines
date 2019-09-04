@@ -14,7 +14,7 @@ import multiprocessing
 from multiprocessing import Process
 
 from nsm import nn_util
-from nsm.agent_factory import PGAgent
+from nsm.parser_module.agent import PGAgent
 from nsm.env_factory import Trajectory, QAProgrammingEnv, Sample
 
 import torch

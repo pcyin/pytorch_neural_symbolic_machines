@@ -1,31 +1,28 @@
-"""Implementation of RL agents."""
 import collections
 import math
-from collections import OrderedDict
 import sys
+from collections import OrderedDict
+from typing import Dict, List
+
 import numpy as np
-from typing import List, Dict
+import torch
+from torch import nn as nn
+from torch.nn import functional as F
 from tqdm import tqdm
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-from nsm import nn_util, data_utils, executor_factory
+from nsm import nn_util, executor_factory, data_utils
+from nsm.parser_module.agent import PGAgent
 from nsm.computer_factory import SPECIAL_TKS
-from nsm.env_factory import Observation, Trajectory, QAProgrammingEnv, Sample
-
-# Sample = collections.namedtuple('Sample', ['trajectory', 'prob'])
-from nsm.parser_module.bert_decoder import BertDecoder
+from nsm.env_factory import Trajectory, Observation, Sample, QAProgrammingEnv
 from nsm.parser_module.bert_encoder import BertEncoder
 from nsm.parser_module.decoder import DecoderBase, Hypothesis, DecoderState
 from nsm.parser_module.encoder import EncoderBase
 from nsm.parser_module.sketch_guided_decoder import SketchGuidedDecoder
 from nsm.sketch.sketch import Sketch
-from nsm.sketch.sketch_generator import SketchPredictor, SketchEncoder
+from nsm.sketch.sketch_predictor import SketchPredictor, SketchEncoder
 
 
-class PGAgent(nn.Module):
+class SketchGuidedAgent(PGAgent):
     "Agent trained by policy gradient."
 
     def __init__(
@@ -36,7 +33,7 @@ class PGAgent(nn.Module):
         config: Dict, discount_factor: float = 1.0,
         log=None
     ):
-        super(PGAgent, self).__init__()
+        super(SketchGuidedAgent, self).__init__(encoder, decoder, sketch_predictor, config)
 
         self.config = config
         self.discount_factor = discount_factor
@@ -48,17 +45,6 @@ class PGAgent(nn.Module):
         self.sketch_encoder = sketch_encoder
 
         self.log = log
-
-    @property
-    def memory_size(self):
-        return self.decoder.memory_size
-
-    @property
-    def device(self):
-        return next(self.parameters()).device
-
-    def encode(self, env_context):
-        return self.encoder.encode(env_context)
 
     def compute_trajectory_actions_prob(self, trajectories: List[Trajectory], return_info=False) -> torch.Tensor:
         contexts = [traj.context for traj in trajectories]
@@ -134,118 +120,6 @@ class PGAgent(nn.Module):
             return tgt_trajectory_log_probs, info
 
         return tgt_trajectory_log_probs
-
-    def compute_trajectory_prob(self, trajectories: List[Trajectory], log=True) -> torch.Tensor:
-        with torch.no_grad():
-            traj_log_prob = self.forward(trajectories)
-
-            if not log:
-                traj_log_prob = traj_log_prob.exp()
-
-            return traj_log_prob.tolist()
-
-    def forward(self, trajectories: List[Trajectory], entropy=False, return_info=False):
-        # (batch_size, max_action_len)
-        traj_log_prob, meta_info = self.compute_trajectory_actions_prob(trajectories, return_info=True)
-
-        # compute entropy
-        if entropy:
-            # (batch_size, max_action_len, memory_size)
-            logits = meta_info['action_logits']
-            action_log_probs = meta_info['action_log_probs']
-            # (batch_size, max_action_len, memory_size)
-            valid_action_mask = meta_info['valid_action_mask']
-            # (batch_size, max_action_len)
-            tgt_action_mask = meta_info['tgt_action_mask']
-
-            # masked_logits = logits * tgt_action_mask + (1. - tgt_action_mask) * -1.e30  # mask logits with a very negative number
-
-            # max_z, pos = torch.max(masked_logits, dim=-1, keepdim=True)
-            # z = masked_logits - max_z
-            # exp_z = torch.exp(z)
-            # (batch_size, max_action_len)
-            # sum_exp_z = torch.sum(exp_z, dim=-1, keepdim=True)
-
-            p_action = nn_util.masked_softmax(logits, mask=valid_action_mask)
-            # neg_log_action = torch.log(sum_exp_z) - z
-
-            H = - p_action * action_log_probs * valid_action_mask
-            # H = p_action * neg_log_action
-            H = torch.sum(H, dim=-1).sum(dim=-1) / tgt_action_mask.sum(-1)
-
-            return traj_log_prob, H
-
-        if return_info:
-            return traj_log_prob, meta_info
-
-        return traj_log_prob
-
-    def sample_gpu(self, environments, sample_num, use_cache=False):
-        if use_cache:
-            # if already explored everything, then don't explore this environment anymore.
-            environments = [env for env in environments if not env.cache.is_full()]
-
-        duplicated_envs = []
-        for env in environments:
-            for i in range(sample_num):
-                duplicated_envs.append(env.clone())
-
-        environments = duplicated_envs
-        for env in environments:
-            env.use_cache = use_cache
-
-        env_context = [env.get_context() for env in environments]
-        context_encoding = self.encode(env_context)
-
-        observations_tm1 = [env.start_ob for env in environments]
-        state_tm1 = self.decoder.get_initial_state(context_encoding)
-        sample_probs = torch.zeros(len(environments), device=self.device)
-
-        active_env_ids = set(range(len(environments)))
-        while True:
-            batched_ob_tm1 = Observation.to_batched_input(observations_tm1, memory_size=self.memory_size).to(self.device)
-            mem_logits, state_t = self.decoder.step(observations_tm1, state_tm1, context_encoding=context_encoding)
-
-            # (batch_size)
-            sampled_action_t_id, sampled_action_t_prob = self.sample_action(mem_logits, batched_ob_tm1.valid_action_mask,
-                                                                            return_log_prob=True)
-
-            observations_t = []
-            new_active_env_ids = set()
-            for env_id, (env, action_t) in enumerate(zip(environments, sampled_action_t_id.tolist())):
-                if env_id in active_env_ids:
-                    action_rel_id = env.valid_actions.index(action_t)
-                    ob_t, _, _, info = env.step(action_rel_id)
-                    if env.done:
-                        observations_t.append(observations_tm1[env_id])
-                    else:
-                        # if the ob_t.valid_action_indices is empty, then the environment will terminate automatically,
-                        # so these is not need to check if this field is empty.
-                        observations_t.append(ob_t)
-                        new_active_env_ids.add(env_id)
-                else:
-                    observations_t.append(observations_tm1[env_id])
-
-            sample_probs = sample_probs + sampled_action_t_prob
-            # print(sample_probs)
-
-            if new_active_env_ids:
-                # context_encoding = nn_util.dict_index_select(context_encoding, active_env_ids)
-                # observations_tm1 = [observations_t[i] for i in active_env_ids]
-                # state_tm1 = state_t[active_env_ids]
-                observations_tm1 = observations_t
-                state_tm1 = state_t
-                active_env_ids = new_active_env_ids
-            else:
-                break
-
-        samples = []
-        for env_id, env in enumerate(environments):
-            if not env.error:
-                traj = Trajectory.from_environment(env)
-                samples.append(Sample(trajectory=traj, prob=sample_probs[env_id].item()))
-
-        return samples
 
     def sample(
         self, environments, sample_num, use_cache=False,
@@ -746,196 +620,8 @@ class PGAgent(nn.Module):
 
             return samples_list
 
-    def beam_search(self, environments, beam_size, use_cache=False):
-        # if already explored everything, then don't explore this environment anymore.
-        if use_cache:
-            # if already explored everything, then don't explore this environment anymore.
-            environments = [env for env in environments if not env.cache.is_full()]
-
-        batch_size = len(environments)
-        max_live_hyp_num = 1
-        live_beam_names = [env.name for env in environments]
-
-        beams = OrderedDict((env.name, [dict(env=env, score=0.)]) for env in environments)
-        completed_hyps = OrderedDict((env.name, []) for env in environments)
-        empty_hyp = dict(env=None, score=float('-inf'), ob=Observation.empty(), parent_beam_abs_pos=0)
-
-        # (env_num, ...)
-        env_context = [env.get_context() for env in environments]
-        context_encoding_expanded = context_encoding = self.encode(env_context)
-
-        observations_tm1 = [env.start_ob for env in environments]
-        state_tm1 = self.decoder.get_initial_state(context_encoding)
-        hyp_scores_tm1 = torch.zeros(batch_size, device=self.device)
-
-        def _expand_context(_ctx_encoding, _live_beam_ids, _max_live_hyp_num):
-            _expand_ctx_dict = dict()
-
-            for key, tensor in _ctx_encoding.items():
-                if key in {'question_encoding', 'question_mask', 'question_encoding_att_linear'}:  # don't need this
-                    if len(_live_beam_ids) < batch_size:
-                        tensor = tensor[_live_beam_ids]
-
-                    new_tensor_size = list(tensor.size())
-                    new_tensor_size.insert(1, _max_live_hyp_num)
-                    exp_tensor = tensor.unsqueeze(1).expand(*new_tensor_size).contiguous().view(*([-1] + new_tensor_size[2:]))
-
-                    _expand_ctx_dict[key] = exp_tensor
-
-            return _expand_ctx_dict
-
-        while beams:
-            live_beam_num = len(beams)
-            batched_ob_tm1 = Observation.to_batched_input(observations_tm1, memory_size=self.memory_size).to(self.device)
-
-            # (live_beam_num * max_live_hyp_num, memory_size)
-            # (live_beam_num * max_live_hyp_num, ...)
-            action_probs_t, state_t = self.decoder.step_and_get_action_scores_t(batched_ob_tm1, state_tm1,
-                                                                                context_encoding=context_encoding_expanded)
-            action_probs_t[(1 - batched_ob_tm1.valid_action_mask).byte()] = float('-inf')
-
-            new_hyp_scores = action_probs_t + hyp_scores_tm1.unsqueeze(-1)
-            # (live_beam_num, sorted_cand_list_size)
-            sorted_cand_list_size = beam_size
-            top_cand_hyp_scores, top_cand_hyp_pos = torch.topk(new_hyp_scores.view(live_beam_num, -1), k=sorted_cand_list_size, dim=-1)   # have some buffer since not all valid actions will execute without error
-
-            # (live_beam_num, sorted_cand_list_size)
-            prev_hyp_ids = (top_cand_hyp_pos / self.memory_size).cpu()
-            hyp_action_ids = (top_cand_hyp_pos % self.memory_size).cpu()
-            top_cand_hyp_scores = top_cand_hyp_scores.cpu()  # move this tensor to cpu for fast indexing
-
-            new_beams = OrderedDict()
-            for beam_id, (env_name, beam) in enumerate(beams.items()):
-                live_beam_size = beam_size - len(completed_hyps[env_name])
-                for cand_idx in range(sorted_cand_list_size):
-                    # if this is a valid action, create a new continuating hypothesis
-                    # otherwise, the remaining hyps are all invalid, we can simply skip
-
-                    new_hyp_score = top_cand_hyp_scores[beam_id, cand_idx].item()
-                    if math.isinf(new_hyp_score): break
-
-                    prev_hyp_id = prev_hyp_ids[beam_id, cand_idx].item()
-                    prev_hyp = beams[env_name][prev_hyp_id]
-                    hyp_action_id = hyp_action_ids[beam_id, cand_idx].item()
-
-                    new_hyp_env = prev_hyp['env'].clone()  # TODO: this is painfully slow
-                    rel_action_id = new_hyp_env.valid_actions.index(hyp_action_id)
-                    ob_t, _, _, info = new_hyp_env.step(rel_action_id)
-
-                    if new_hyp_env.done:
-                        if not new_hyp_env.error:
-                            new_hyp = Hypothesis(env=new_hyp_env, score=new_hyp_score)
-                            completed_hyps[new_hyp_env.name].append(new_hyp)
-                    else:
-                        new_hyp_beam_abs_pos = max_live_hyp_num * beam_id + prev_hyp_id
-                        new_hyp = dict(env=new_hyp_env, score=new_hyp_score,
-                                       ob=ob_t, parent_beam_abs_pos=new_hyp_beam_abs_pos)
-
-                        new_beams.setdefault(env_name, []).append(new_hyp)
-
-                        if len(new_beams.get(env_name, [])) == live_beam_size:
-                            break
-
-            if len(new_beams) == 0:
-                break
-
-            # pad the beam
-            new_max_live_hyp_num = max(len(v) for v in new_beams.values())
-            observations_t = []
-            new_hyp_beam_abs_pos_list = []
-            hyp_scores_tm1 = []
-            for env_name, beam in new_beams.items():
-                live_hyp_num = len(beam)
-                padded_beam = beam
-                if live_hyp_num < new_max_live_hyp_num:
-                    padded_beam = beam + [empty_hyp] * (new_max_live_hyp_num - live_hyp_num)
-
-                for hyp in padded_beam:
-                    observations_t.append(hyp['ob'])
-                    new_hyp_beam_abs_pos_list.append(hyp['parent_beam_abs_pos'])
-                    hyp_scores_tm1.append(hyp['score'])
-
-            new_hyp_state_t = [(s[0][new_hyp_beam_abs_pos_list], s[1][new_hyp_beam_abs_pos_list]) for s in state_t.state]
-            new_hyp_memory_t = state_t.memory[new_hyp_beam_abs_pos_list]
-            hyp_scores_tm1 = torch.tensor(hyp_scores_tm1, device=self.device)
-
-            state_tm1 = DecoderState(state=new_hyp_state_t, memory=new_hyp_memory_t)
-            observations_tm1 = observations_t
-            beams = new_beams
-
-            # compute new padded context encoding if needed
-            new_live_beam_names = [env_name for env_name in beams]
-            if new_live_beam_names != live_beam_names or new_max_live_hyp_num != max_live_hyp_num:
-                live_beam_ids = [i for i, env in enumerate(environments) if env.name in new_beams]
-                context_encoding_expanded = _expand_context(context_encoding, live_beam_ids, new_max_live_hyp_num)
-            live_beam_names = new_live_beam_names
-            max_live_hyp_num = new_max_live_hyp_num
-
-        # rank completed hypothesis
-        for env_name in completed_hyps.keys():
-            sorted_hyps = sorted(completed_hyps[env_name], key=lambda hyp: hyp.score, reverse=True)[:beam_size]
-            completed_hyps[env_name] = [Sample(trajectory=Trajectory.from_environment(hyp.env), prob=hyp.score) for hyp in sorted_hyps]
-
-        return completed_hyps
-
-    def decode_examples(self, environments: List[QAProgrammingEnv], beam_size, batch_size=32):
-        decode_results = []
-        use_sketch_constrained_decoding = self.config.get('use_sketch_constrained_decoding', False)
-
-        if use_sketch_constrained_decoding:
-            assert self.sketch_predictor is not None
-            print('[Model] use sketch-constrained decoding...', file=sys.stderr)
-            num_sketch = self.config.get('sketch_constrained_decoding_num_sketch', 5)
-
-        with torch.no_grad():
-            batch_iter = nn_util.batch_iter(environments, batch_size, shuffle=False)
-            for batched_envs in tqdm(batch_iter, total=len(environments) // batch_size, file=sys.stdout):
-                if use_sketch_constrained_decoding:
-                    batched_hyp_sketches = self.sketch_predictor.get_sketches(
-                        batched_envs, K=num_sketch
-                    )
-                    constraint_sketches = {
-                        env.name: sketches
-                        for env, sketches
-                        in zip(batched_envs, batched_hyp_sketches)
-                    }
-                else:
-                    constraint_sketches = None
-
-                batch_decode_result = self.new_beam_search(
-                    batched_envs,
-                    beam_size=beam_size,
-                    constraint_sketches=constraint_sketches,
-                    strict_constraint_on_sketches=use_sketch_constrained_decoding
-                )
-
-                batch_decode_result = list(batch_decode_result.values())
-                decode_results.extend(batch_decode_result)
-
-        return decode_results
-
-    def sample_action(self, logits, valid_action_mask, return_log_prob=False):
-        """
-        logits: (batch_size, action_num)
-        valid_action_mask: (batch_size, action_num)
-        """
-
-        # p_actions = nn_util.masked_softmax(logits, mask=valid_action_mask)
-        logits.masked_fill_((1 - valid_action_mask).byte(), -math.inf)
-        p_actions = F.softmax(logits, dim=-1)
-        # (batch_size, 1)
-        sampled_actions = torch.multinomial(p_actions, num_samples=1)
-
-        if return_log_prob:
-            log_p_actions = nn_util.masked_log_softmax(logits, mask=valid_action_mask)
-            log_prob = torch.gather(log_p_actions, dim=1, index=sampled_actions).squeeze(-1)
-
-            return sampled_actions.squeeze(-1), log_prob
-
-        return sampled_actions.squeeze(-1)
-
-    @staticmethod
-    def build(config, params=None):
+    @classmethod
+    def build(cls, config, params=None):
         dummy_kg = {
             'kg': None,
             'num_props': [],
@@ -964,7 +650,7 @@ class PGAgent(nn.Module):
 
         decoder = SketchGuidedDecoder.build(config, encoder, sketch_encoder)
 
-        return PGAgent(
+        return cls(
             encoder, decoder,
             sketch_predictor=sketch_predictor,
             sketch_encoder=sketch_encoder,

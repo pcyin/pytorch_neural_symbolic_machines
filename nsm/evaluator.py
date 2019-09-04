@@ -8,7 +8,8 @@ import numpy as np
 from tensorboardX import SummaryWriter
 
 from nsm import nn_util
-from nsm.agent_factory import PGAgent
+from nsm.parser_module import get_parser_agent_by_name
+from nsm.parser_module.agent import PGAgent
 from nsm.consistency_utils import ConsistencyModel, QuestionSimilarityModel
 from nsm.env_factory import QAProgrammingEnv, Sample
 
@@ -74,7 +75,8 @@ class Evaluator(torch_mp.Process):
         # seed the random number generators
         nn_util.init_random_seed(self.config['seed'], self.device)
 
-        self.agent = PGAgent.build(self.config).to(self.device).eval()
+        agent_name = self.config.get('parser', 'vanilla')
+        self.agent = get_parser_agent_by_name(agent_name).build(self.config).to(self.device).eval()
 
         self.load_environments()
         summary_writer = SummaryWriter(os.path.join(self.config['work_dir'], 'tb_log/dev'))

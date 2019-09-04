@@ -213,7 +213,7 @@ class BertDecoder(DecoderBase):
         att_weight = torch.bmm(keys, query.unsqueeze(2)).squeeze(2)
 
         if entry_masks is not None:
-            att_weight.data.masked_fill_((1.0 - entry_masks).byte(), -float('inf'))
+            att_weight.data.masked_fill_((1.0 - entry_masks).bool(), -float('inf'))
 
         att_prob = F.softmax(att_weight, dim=-1)
 

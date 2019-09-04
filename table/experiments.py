@@ -30,7 +30,7 @@ import torch
 from pytorch_pretrained_bert import BertTokenizer
 
 from nsm.actor import Actor
-from nsm.agent_factory import PGAgent
+from nsm.parser_module.agent import PGAgent
 from nsm.embedding import EmbeddingModel
 from nsm.env_factory import QAProgrammingEnv
 from nsm.computer_factory import LispInterpreter

@@ -1,246 +1,22 @@
-import heapq
-import math
-import multiprocessing
 import os
-import random
 import re
 import sys
 import time
 import json
 from pathlib import Path
-from typing import List, Dict
-
-import numpy as np
 
 import torch.multiprocessing as torch_mp
-from multiprocessing import Process
 
 from nsm import nn_util
-from nsm.agent_factory import PGAgent
+from nsm.parser_module import get_parser_agent_by_name
+from nsm.parser_module.agent import PGAgent
+from nsm.parser_module.sketch_guided_agent import SketchGuidedAgent
 from nsm.consistency_utils import ConsistencyModel, QuestionSimilarityModel
-from nsm.env_factory import Trajectory, Environment, Sample
 
 import torch
 
-from nsm.program_cache import SharedProgramCache
-from nsm.dist_util import STOP_SIGNAL
+from nsm.replay_buffer import ReplayBuffer
 from nsm.sketch.sketch import SketchManager
-
-
-def normalize_probs(p_list):
-    smoothing = 1.e-8
-    p_list = np.array(p_list) + smoothing
-
-    return p_list / p_list.sum()
-
-
-class ReplayBuffer(object):
-    def __init__(self, agent, shared_program_cache, discount_factor=1.0, debug=False):
-        self.trajectory_buffer = dict()
-        self.discount_factor = discount_factor
-        self.agent = agent
-        self.shared_program_cache = shared_program_cache
-        self.env_program_prob_dict = dict()
-        self.env_program_prob_sum_dict = dict()
-
-    def load(self, envs: List[Environment], saved_programs_file_path: str):
-        programs = json.load(open(saved_programs_file_path))
-
-        trajectories = []
-        n = 0
-        total_env = 0
-        n_found = 0
-        for env in envs:
-            total_env += 1
-            found = False
-            if env.name in programs:
-                program_str_list = programs[env.name]
-                n += len(program_str_list)
-                env.cache._set = set(program_str_list)
-                for program_str in program_str_list:
-                    program = program_str.split()
-                    try:
-                        traj = Trajectory.from_program(env, program)
-                    except ValueError:
-                        print(f'Error loading program {program} for env {env.name}', file=sys.stderr)
-                        continue
-
-                    if traj is not None and traj.reward > 0.:
-                        trajectories.append(traj)
-                        found = True
-                        n_found += 1
-
-        print('@' * 100, file=sys.stderr)
-        print('loading programs from file {}'.format(saved_programs_file_path), file=sys.stderr)
-        print('at least 1 solution found fraction: {}'.format(
-            float(n_found) / total_env), file=sys.stderr)
-
-        self.save_trajectories(trajectories)
-        print('{} programs in the file'.format(n), file=sys.stderr)
-        print('{} programs extracted'.format(len(trajectories)), file=sys.stderr)
-        print('{} programs in the buffer'.format(self.program_num), file=sys.stderr)
-        print('@' * 100, file=sys.stderr)
-
-    def has_found_solution(self, env_name):
-        return env_name in self.trajectory_buffer and self.trajectory_buffer[env_name]
-
-    def contains(self, traj: Trajectory):
-        env_name = traj.environment_name
-        if env_name not in self.trajectory_buffer:
-            return False
-
-        program = traj.program
-        program_str = ' '.join(program)
-
-        if program_str in self.env_program_prob_dict[env_name]:
-            return True
-        else:
-            return False
-
-    @property
-    def size(self):
-        n = 0
-        for _, v in self.trajectory_buffer.items():
-            n += len(v)
-        return n
-
-    @property
-    def program_num(self):
-        return sum(len(v) for v in self.env_program_prob_dict.values())
-
-    def update_program_prob(self, env_name, program: List[str], prob: float):
-        self.env_program_prob_dict[env_name][' '.join(program)] = prob
-        self.shared_program_cache.update_hypothesis_prob(env_name, program, prob)
-
-    def add_trajectory(self, trajectory: Trajectory, prob=None):
-        program = trajectory.program
-
-        self.shared_program_cache.add_trajectory(trajectory, prob)
-        self.env_program_prob_dict.setdefault(trajectory.environment_name, dict())[' '.join(program)] = prob
-
-        self.trajectory_buffer.setdefault(trajectory.environment_name, []).append(trajectory)
-
-    def save_trajectories(self, trajectories):
-        for trajectory in trajectories:
-            # program_str = ' '.join(trajectory.to_program)
-            # if trajectory.reward == 1.:
-            if not self.contains(trajectory):
-                # print(f'add 1 traj [{trajectory}] for env [{trajectory.environment_name}] to buffer', file=sys.stderr)
-                self.add_trajectory(trajectory)
-
-    def save_samples(self, samples: List[Sample], log=True):
-        for sample in samples:
-            if not self.contains(sample.trajectory):
-                prob = math.exp(sample.prob) if log else sample.prob
-                self.add_trajectory(sample.trajectory, prob=prob)
-
-    def all_samples(self, agent=None):
-        samples = dict()
-        for env_name, trajs in self.trajectory_buffer.items():
-            samples[env_name] = [Sample(traj, prob=self.env_program_prob_dict[env_name][' '.join(traj.program)]) for traj in trajs]
-
-        return samples
-
-    def replay(self, environments, n_samples=1, use_top_k=False, truncate_at_n=0, replace=True,
-               consistency_model=None, constraint_sketches=None, debug_file=None):
-        select_env_names = set([e.name for e in environments])
-        trajs = []
-
-        # Collect all the trajs for the selected environments.
-        for env_name in select_env_names:
-            if env_name in self.trajectory_buffer:
-                trajs += self.trajectory_buffer[env_name]
-
-        if len(trajs) == 0:
-            return []
-
-        # chunk the trajectories, in case there are so many
-        chunk_size = 64
-        trajectory_probs = []
-        for i in range(0, len(trajs), chunk_size):
-            trajs_chunk = trajs[i: i + chunk_size]
-            traj_chunk_probs = self.agent.compute_trajectory_prob(trajs_chunk, log=False)
-            trajectory_probs.extend(traj_chunk_probs)
-
-        # Put the samples into an dictionary keyed by env names.
-        samples = [Sample(trajectory=t, prob=p) for t, p in zip(trajs, trajectory_probs)]
-        env_sample_dict = dict()
-        for sample in samples:
-            env_name = sample.trajectory.environment_name
-            env_sample_dict.setdefault(env_name, []).append(sample)
-
-        replay_samples = []
-        for env_name, samples in env_sample_dict.items():
-            n = len(samples)
-
-            # Compute the sum of prob of replays in the buffer.
-            self.env_program_prob_sum_dict[env_name] = sum([sample.prob for sample in samples])
-
-            for sample in samples:
-                self.update_program_prob(env_name, sample.trajectory.program, sample.prob)
-
-            # Truncated the number of samples in the selected
-            # samples and in the buffer.
-            if 0 < truncate_at_n < n:
-                # Randomize the samples before truncation in case
-                # when no prob information is provided and the trajs
-                # need to be truncated randomly.
-                random.shuffle(samples)
-                samples = heapq.nlargest(
-                    truncate_at_n, samples, key=lambda s: s.prob)
-
-            if use_top_k:
-                # Select the top k samples weighted by their probs.
-                selected_samples = heapq.nlargest(
-                    n_samples, samples, key=lambda s: s.prob)
-                # replay_samples += normalize_probs(selected_samples)
-            else:
-                # Randomly samples according to their probs.
-
-                has_any_constraint_sketches = constraint_sketches and constraint_sketches[env_name]
-                if has_any_constraint_sketches:
-                    question_constraint_sketches = constraint_sketches[env_name]
-                    samples = [
-                        sample
-                        for sample in samples
-                        if any(
-                            sketch.is_compatible_with_program(sample.trajectory.program)
-                            for sketch in question_constraint_sketches
-                        )
-                    ]
-                    if len(samples) == 0:
-                        continue
-
-                    if debug_file:
-                        print("Compatible Samples for Replay:", file=debug_file)
-                        for sample in samples:
-                            print(
-                                f"[{env_name}] {' '.join(sample.trajectory.program)} (prob={sample.prob})",
-                                file=debug_file
-                            )
-
-                if consistency_model:
-                    # log_p_samples = np.log([sample.prob for sample in samples])
-                    p_samples = consistency_model.compute_consistency_and_rescore(env_name, samples)
-                    # p_samples = consistency_model.rescore(log_p_samples, consistency_scores)
-                else:
-                    p_samples = normalize_probs([sample.prob for sample in samples])
-
-                if replace:
-                    selected_sample_indices = np.random.choice(
-                        len(samples),
-                        size=n_samples,
-                        p=p_samples)
-                else:
-                    sample_num = min(len(samples), n_samples)
-                    selected_sample_indices = np.random.choice(len(samples), sample_num, p=p_samples, replace=False)
-
-                selected_samples = [samples[i] for i in selected_sample_indices]
-
-            selected_samples = [Sample(trajectory=sample.trajectory, prob=sample.prob) for sample in selected_samples]
-            replay_samples += selected_samples
-
-        return replay_samples
 
 
 class Actor(torch_mp.Process):
@@ -309,18 +85,12 @@ class Actor(torch_mp.Process):
                                                       log_file=os.path.join(self.config['work_dir'], f'consistency_model_actor_{self.actor_id}.log'),
                                                       debug=self.actor_id == 0)
 
-        if self.use_sketch_exploration or self.use_sketch_guided_replay:
-            print(f'[Actor {self.actor_id}] Loading sketch manager', file=sys.stderr)
-            self.sketch_manager = SketchManager(
-                self.shared_program_cache,
-                QuestionSimilarityModel.load(self.config['question_similarity_model_path'])
-            )
-
         # create agent and set it to evaluation mode
         if 'cuda' in str(self.device.type):
             torch.cuda.set_device(self.device)
 
-        self.agent = PGAgent.build(self.config).to(self.device).eval()
+        agent_name = self.config.get('parser', 'vanilla')
+        self.agent = get_parser_agent_by_name(agent_name).build(self.config).to(self.device).eval()
 
         self.replay_buffer = ReplayBuffer(self.agent, self.shared_program_cache)
 
@@ -358,8 +128,9 @@ class Actor(torch_mp.Process):
 
                         strict_constraint_on_sketches = config.get('sketch_explore_strict_constraint_on_sketch', True)
                         force_sketch_coverage = config.get('sketch_explore_force_coverage', False)
+                        constraint_sketches = None
 
-                        if None:  # self.use_sketch_exploration:
+                        if isinstance(self.agent, PGAgent) and self.use_sketch_exploration:
                             constraint_sketches = dict()
                             explore_beam_size = config.get('sketch_explore_beam_size', 5)
                             num_sketches_per_example = config.get('num_candidate_sketches', 5)
@@ -370,7 +141,7 @@ class Actor(torch_mp.Process):
                             if epoch_id <= use_sketch_exploration_for_nepoch:
                                 t1 = time.time()
                                 if use_trainable_sketch_manager:
-                                    candidate_sketches = self.agent.sketch_manager.get_sketches(
+                                    candidate_sketches = self.agent.sketch_predictor.get_sketches(
                                         batched_envs,
                                         K=num_sketches_per_example
                                     )
@@ -378,7 +149,7 @@ class Actor(torch_mp.Process):
                                         constraint_sketches[env.name] = sketches
                                 else:
                                     for env in batched_envs:
-                                        env_candidate_sketches = self.sketch_manager.get_sketches_from_similar_questions(
+                                        env_candidate_sketches = self.sketch_predictor.get_sketches_from_similar_questions(
                                             env.name,
                                             remove_explored=remove_explored_sketch,
                                             log_file=None
@@ -408,8 +179,6 @@ class Actor(torch_mp.Process):
                                             f"{json.dumps(env_candidate_sketches, indent=2, default=str)}",
                                             file=debug_file
                                         )
-                        else:
-                            constraint_sketches = None
 
                         t1 = time.time()
                         if sample_method == 'sample':
@@ -425,7 +194,7 @@ class Actor(torch_mp.Process):
                                 beam_size=config['n_explore_samples'],
                                 use_cache=config['use_cache'],
                                 return_list=True,
-                                constraint_sketches=None,
+                                constraint_sketches=constraint_sketches,
                                 strict_constraint_on_sketches=strict_constraint_on_sketches,
                                 force_sketch_coverage=force_sketch_coverage
                             )
@@ -464,11 +233,7 @@ class Actor(torch_mp.Process):
                                 print(f"Question [{env.name}] "
                                       f"{env.question_annotation['question']}", file=debug_file)
 
-                                env_candidate_sketches = self.sketch_manager.get_sketches_from_similar_questions(
-                                    env.name,
-                                    remove_explored=False,
-                                    log_file=debug_file
-                                )
+                                env_candidate_sketches = self.agent.sketch_predictor.get_sketches(batched_envs)
 
                                 print(
                                     f"Candidate sketches in the cache:\n"
@@ -614,7 +379,7 @@ class Actor(torch_mp.Process):
                     sys.stderr.flush()
 
     def load_environments(self, file_paths, example_ids=None):
-        from table.experiments import load_environments, create_environments
+        from table.experiments import load_environments
         envs = load_environments(file_paths,
                                  example_ids=example_ids,
                                  table_file=self.config['table_file'],

@@ -17,7 +17,8 @@ import multiprocessing
 from pytorch_pretrained_bert import BertAdam
 
 from nsm import nn_util
-from nsm.agent_factory import PGAgent
+from nsm.parser_module import get_parser_agent_by_name
+from nsm.parser_module.agent import PGAgent
 from nsm.consistency_utils import ConsistencyModel, QuestionSimilarityModel
 from nsm.retrainer import Retrainer, load_nearest_neighbors
 from nsm.evaluator import Evaluation
@@ -27,7 +28,7 @@ import torch
 from tensorboardX import SummaryWriter
 
 from nsm.dist_util import STOP_SIGNAL
-from nsm.sketch.sketch_generator import SketchPredictor, SketchManagerTrainer
+from nsm.sketch.sketch_predictor import SketchPredictor, SketchManagerTrainer
 
 
 class Learner(torch_mp.Process):
@@ -54,7 +55,8 @@ class Learner(torch_mp.Process):
         # seed the random number generators
         nn_util.init_random_seed(self.config['seed'], self.device)
 
-        self.agent = PGAgent.build(self.config).to(self.device).train()
+        agent_name = self.config.get('parser', 'vanilla')
+        self.agent = get_parser_agent_by_name(agent_name).build(self.config).to(self.device).train()
 
         self.train()
 
