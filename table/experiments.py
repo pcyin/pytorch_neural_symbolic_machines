@@ -95,13 +95,29 @@ def annotate_example_for_bert(example: Dict, table: Dict, bert_tokenizer: BertTo
 
     table_repr_method = args.get('table_representation', 'concate')
     if table_repr_method == 'concate':
-        columns = get_columns_concate(example, table, bert_tokenizer)
+        columns, column_info = get_columns_concate(example, table, bert_tokenizer)
     elif table_repr_method == 'canonical':
-        columns = get_columns_canonical(example, table, bert_tokenizer)
+        columns, column_info = get_columns_canonical(example, table, bert_tokenizer)
     else:
         raise RuntimeError('Unknown table representation')
 
-    table = Table(id=example['context'], header=columns)
+    # gather table data
+    rows = [table['kg'][row_id] for row_id in sorted(table['kg'])]
+    valid_rows = []
+    for row in rows:
+        valid_row = {}
+        for col in columns:
+            cell_val = row.get(col.raw_name, [])
+            if cell_val:
+                cell_val = str(cell_val[0])
+                cell_tokens = bert_tokenizer.tokenize(cell_val)
+            else:
+                cell_tokens = []
+            valid_row[col.name] = cell_tokens
+
+        valid_rows.append(valid_row)
+
+    table = Table(id=example['context'], header=columns, data=valid_rows, column_info=column_info)
     example['table'] = table
 
     return example
@@ -139,6 +155,7 @@ def get_columns_canonical(example, table, bert_tokenizer):
             raw_column_canonical_ids.append(canonical_column_ids[untyped_column_name])
         else:
             column = Column(name=untyped_column_name,
+                            raw_name=raw_column_name,
                             type=type_string,
                             sample_value=sample_value,
                             name_tokens=bert_tokenizer.tokenize(column_name),
@@ -153,13 +170,14 @@ def get_columns_canonical(example, table, bert_tokenizer):
                    type=raw_type_string)
         )
 
+    canonical_columns = list(canonical_columns.values())
+
     column_info = {
-        'columns': list(canonical_columns.values()),
         'raw_columns': columns,
         'raw_column_canonical_ids': raw_column_canonical_ids
     }
 
-    return column_info
+    return canonical_columns, column_info
 
 
 def get_columns_concate(example, table, bert_tokenizer):
@@ -190,11 +208,7 @@ def get_columns_concate(example, table, bert_tokenizer):
 
         columns.append(column)
 
-    column_info = {
-        'columns': columns
-    }
-
-    return column_info
+    return columns, {}
 
 
 def get_sample_value(raw_column_name, table, bert_tokenizer):

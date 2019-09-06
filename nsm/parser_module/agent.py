@@ -242,10 +242,8 @@ class PGAgent(nn.Module):
 
             if has_completed_sample:
                 # need to perform slicing
-                context_encoding['question_encoding'] = context_encoding['question_encoding'][new_active_env_pos]
-                context_encoding['question_mask'] = context_encoding['question_mask'][new_active_env_pos]
-                context_encoding['question_encoding_att_linear'] = context_encoding['question_encoding_att_linear'][
-                    new_active_env_pos]
+                for key in self.sufficient_context_encoding_entries:
+                    context_encoding[key] = context_encoding[key][new_active_env_pos]
 
                 state_tm1 = state_t[new_active_env_pos]
                 sample_probs = sample_probs[new_active_env_pos]
@@ -441,10 +439,8 @@ class PGAgent(nn.Module):
             observations_tm1 = observations_t
             hyp_scores_tm1 = torch.tensor(new_hyp_scores, device=self.device)
 
-            for key in context_encoding_expanded:
-                if key in {'question_encoding', 'question_mask', 'question_encoding_att_linear'}:
-                    tensor = context_encoding_expanded[key]
-                    context_encoding_expanded[key] = tensor[new_hyp_parent_abs_pos_list]
+            for key in self.sufficient_context_encoding_entries:
+                context_encoding_expanded[key] = context_encoding_expanded[key][new_hyp_parent_abs_pos_list]
 
             beams = new_beams
 

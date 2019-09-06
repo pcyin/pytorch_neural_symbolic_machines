@@ -28,7 +28,20 @@ class Column(object):
 
 
 class Table(object):
-    def __init__(self, id, header, data=None):
+    def __init__(self, id, header, data=None, **kwargs):
         self.id = id
         self.header = header
         self.data = data
+        self.fields = []
+
+        for key, val in kwargs.items():
+            self.fields.append(key)
+            setattr(self, key, val)
+
+    def with_rows(self, rows):
+        extra_fields = {f: getattr(self, f) for f in self.fields}
+
+        return Table(self.id, self.header, data=rows, **extra_fields)
+
+    def __len__(self):
+        return len(self.data)
