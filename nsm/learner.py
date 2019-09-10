@@ -71,14 +71,12 @@ class Learner(torch_mp.Process):
         max_train_step = config['max_train_step']
         save_program_cache_niter = config.get('save_program_cache_niter', 0)
         freeze_bert_for_niter = config.get('freeze_bert_niter', 0)
-        # if freeze_bert:
-        #     for p in model.encoder.bert_model.parameters():
-        #         p.requires_grad = False
+        gradient_accumulation_niter = config.get('gradient_accumulation_niter', 1)
 
         bert_params = [
             (p_name, p)
             for (p_name, p) in model.named_parameters()
-            if 'bert_model' in p_name
+            if 'bert_model' in p_name and p.requires_grad
         ]
 
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
@@ -87,13 +85,12 @@ class Learner(torch_mp.Process):
              'weight_decay': 0.01},
             {'params': [p for n, p in bert_params if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
-        num_train_optimization_steps = max_train_step
 
         bert_optimizer = BertAdam(
             bert_grouped_parameters,
             lr=self.config['bert_learning_rate'],
             warmup=0.1,
-            t_total=num_train_optimization_steps)
+            t_total=max_train_step)
 
         other_params = [
             p
@@ -101,51 +98,16 @@ class Learner(torch_mp.Process):
             in model.named_parameters()
             if 'bert_model' not in n and p.requires_grad
         ]
-        use_finetune = config['use_finetune']
+
+        other_optimizer = torch.optim.Adam(other_params, lr=0.001)
 
         cum_loss = cum_examples = 0.
         t1 = time.time()
 
-        if use_finetune:
-            from table.experiments import load_environments
-            print(f'load training and dev files for fine-tuning', file=sys.stderr)
-            train_set = load_environments([config['train_file']],
-                                          table_file=config['table_file'],
-                                          vocab_file=config['vocab_file'],
-                                          en_vocab_file=config['en_vocab_file'],
-                                          embedding_file=config['embedding_file'])
-
-            dev_set = load_environments([config['dev_file']],
-                                        table_file=config['table_file'],
-                                        vocab_file=config['vocab_file'],
-                                        en_vocab_file=config['en_vocab_file'],
-                                        embedding_file=config['embedding_file'])
-
-            fine_tune_start = config['fine_tune_start']
-            fine_tune_every_niter = config['fine_tune_every_niter']
-
-            for env in dev_set:
-                env.punish_extra_work = False
-                env.use_cache = False
-
-            print(f'load nearest neighbors', file=sys.stderr)
-            nearest_neighbors = load_nearest_neighbors(config['nearest_neighbors_file'])
-
-            retrainer = Retrainer(model, train_set, nearest_neighbors, config)
-
-        use_trainable_sketch_manager = config.get('use_trainable_sketch_manager', False)
-        optimizer = torch.optim.Adam(other_params, lr=0.001)
-
-        max_batch_size = self.config['batch_size'] * (self.config['n_replay_samples'] + self.config['n_policy_samples'])
-
-        # nn_util.glorot_init(params)
-        # torch.nn.init.zeros_(model.decoder.output_feature_linear.weight)
-        # torch.nn.init.normal_(model.encoder.context_embedder.trainable_embedding.weight, mean=0., std=0.1)
-        # torch.nn.init.normal_(model.decoder.builtin_func_embeddings.weight, mean=0., std=0.1)
-
         while train_iter < max_train_step:
             train_iter += 1
-            optimizer.zero_grad()
+            other_optimizer.zero_grad()
+            bert_optimizer.zero_grad()
 
             train_samples, samples_info = self.train_queue.get()
             try:
@@ -164,6 +126,10 @@ class Learner(torch_mp.Process):
             batch_log_prob = batch_log_prob * train_sample_weights
 
             loss = -batch_log_prob.mean()
+
+            if gradient_accumulation_niter > 1:
+                loss /= gradient_accumulation_niter
+
             summary_writer.add_scalar('parser_loss', loss.item(), train_iter)
             # loss = -batch_log_prob.sum() / max_batch_size
 
@@ -175,37 +141,20 @@ class Learner(torch_mp.Process):
                 summary_writer.add_scalar('entropy', entropy.item(), train_iter)
                 summary_writer.add_scalar('entropy_reg_loss', ent_reg_loss.item(), train_iter)
 
-            # if use_trainable_sketch_manager:
-            #     context_encoding = meta_info['context_encoding']['table_bert_encoding'] if \
-            #         config.get('sketch_decoder_use_table_bert', False) and \
-            #         config.get('sketch_decoder_use_parser_table_bert', False) \
-            #         else None
-            #
-            #     sketch_log_prob = model.sketch_manager.get_trajectory_sketch_prob(
-            #         train_trajectories,
-            #         context_encoding=context_encoding
-            #     )
-            #
-            #     sketch_loss = -(sketch_log_prob * train_sample_weights).mean()
-            #     summary_writer.add_scalar('sketch_loss', sketch_loss.item(), train_iter)
-            #
-            #     loss = loss + sketch_loss
-
             loss.backward()
             loss_val = loss.item()
 
             # clip gradient
             grad_norm = torch.nn.utils.clip_grad_norm_(other_params, 5.)
 
-            optimizer.step()
+            if train_iter % gradient_accumulation_niter == 0:
+                other_optimizer.step()
 
-            if train_iter > freeze_bert_for_niter:
-                bert_optimizer.step()
-            elif train_iter == freeze_bert_for_niter:
-                print(f'[Learner] train_iter={train_iter} reset Adam optimizer and start fine-tuning BERT')
-                optimizer = torch.optim.Adam(other_params, lr=0.001)
-
-            bert_optimizer.zero_grad()
+                if train_iter > freeze_bert_for_niter:
+                    bert_optimizer.step()
+                elif train_iter == freeze_bert_for_niter:
+                    print(f'[Learner] train_iter={train_iter} reset Adam optimizer and start fine-tuning BERT')
+                    other_optimizer = torch.optim.Adam(other_params, lr=0.001)
 
             # print(f'[Learner] train_iter={train_iter} loss={loss_val}', file=sys.stderr)
             del loss
@@ -216,41 +165,6 @@ class Learner(torch_mp.Process):
 
             cum_loss += loss_val * len(train_samples)
             cum_examples += len(train_samples)
-
-            if use_finetune and train_iter >= fine_tune_start and train_iter % fine_tune_every_niter == 0:
-                print(f'[FineTune] start iterative fine tuning...', file=sys.stderr)
-                dev_scores = []
-
-                dev_result = Evaluation.evaluate(model, dev_set, beam_size=config['beam_size'])
-                dev_score = dev_result['accuracy']
-
-                print(f'[FineTune] initial dev score={dev_score}', file=sys.stderr)
-                dev_scores.append(dev_score)
-                model_state = model.state_dict()
-                model_state_file = os.path.join(config['work_dir'], 'model.tmp.state.bin')
-                torch.save(model_state, model_state_file)
-
-                for i in range(config['fine_tune_nepoch']):
-                    retrainer.fine_tune()
-
-                    dev_result = Evaluation.evaluate(model, dev_set, beam_size=config['beam_size'])
-                    dev_score = dev_result['accuracy']
-
-                    print(f'[FineTune] Epoch {i} dev score={dev_score}', file=sys.stderr)
-                    sys.stderr.flush()
-                    if dev_score > max(dev_scores):
-                        print(f'save current best model', file=sys.stderr)
-                        model_state = model.state_dict()
-                        torch.save(model_state, model_state_file)
-
-                    dev_scores.append(dev_score)
-
-                # if np.argmax(dev_scores) > 0:
-                print(f'[FineTune] reload best model {np.argmax(dev_scores)}', file=sys.stderr)
-                model_state = torch.load(model_state_file)
-                model.load_state_dict(model_state)
-
-                model.train()
 
             if train_iter % save_every_niter == 0:
                 print(f'[Learner] train_iter={train_iter} avg. loss={cum_loss / cum_examples}, '

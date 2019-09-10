@@ -389,7 +389,7 @@ class ContentEncodingTableBERT(TableBERT):
                 new_header = []
                 for column in table.header:
                     new_col = Column(
-                        column.name, column.type, column.sample_value,
+                        column.name, column.type, row[column.name],
                         name_tokens=column.name_tokens, sample_value_tokens=row[column.name]
                     )
                     new_header.append(new_col)
@@ -465,8 +465,8 @@ class ContentEncodingTableBERT(TableBERT):
         # (batch_size, row_num, column_num, encoding_size)
         table_encoding_var = self.flattened_row_encoding_to_table_encoding(
             row_encoding, [len(e.table) for e in examples])
-        max_row_num = table_encoding_var.size(1)
-        table_column_mask = row_tensor_dict['column_mask'][example_first_row_indices]
+        # max_row_num = table_encoding_var.size(1)
+        # table_column_mask = row_tensor_dict['column_mask'][example_first_row_indices]
 
         table_encoding = {
             'value': table_encoding_var,
