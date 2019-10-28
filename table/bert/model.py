@@ -4,7 +4,7 @@ from collections import OrderedDict
 from pathlib import Path
 import json
 from types import SimpleNamespace
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Optional
 import numpy as np
 
 import torch
@@ -12,7 +12,8 @@ from pytorch_pretrained_bert import BertTokenizer
 from torch_scatter import scatter_max, scatter_mean
 import torch.nn as nn
 
-from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel, BertConfig, BertForMaskedLM
+from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel, BertConfig, BertForMaskedLM, \
+    BertForPreTraining
 from torch.nn import CrossEntropyLoss, BCEWithLogitsLoss
 
 from table.bert.data_model import Example, Table, Column
@@ -65,148 +66,79 @@ def get_column_representation(flattened_column_encoding: torch.Tensor,
     return column_encoding
 
 
-def convert_example_to_bert_input(
-        example: Example,
-        config: SimpleNamespace) -> Dict:
-    context_tokens = example.question
-
-    if config.context_first:
-        table_tokens_start_idx = len(context_tokens) + 2  # account for [CLS] and [SEP]
-        max_table_token_length = MAX_BERT_INPUT_LENGTH - len(context_tokens) - 2 - 1  # account for [CLS] and [SEP], and the ending [SEP]
-    else:
-        table_tokens_start_idx = 1  # account for starting [CLS]
-        max_table_token_length = MAX_BERT_INPUT_LENGTH - len(context_tokens) - 2 - 1  # account for [CLS] and [SEP], and the ending [SEP]
-
-    # generate table tokens
-    table_tokens = []
-    col_spans = OrderedDict()
-    col_start_idx = table_tokens_start_idx
-
-    column_item_delimiter = config.column_item_delimiter
-    column_delimiter = config.column_delimiter
-
-    header = example.table.header
-    for col_id, column in enumerate(header):
-        col_tokens = list(column.name_tokens)
-
-        if config.use_type_text:
-            if column_item_delimiter == '(':
-                col_tokens += ['('] + [column.type] + [')']
-            elif column_item_delimiter == '|':
-                col_tokens += ['|', column.type]
-
-        if config.use_sample_value:
-            sample_value_tokens = column.sample_value_tokens[:5]
-            if column_item_delimiter == '(':
-                col_tokens += ['('] + sample_value_tokens + [')']
-            elif column_item_delimiter == '|':
-                col_tokens += ['|'] + sample_value_tokens
-
-        col_tokens += [column_delimiter]
-
-        table_tokens += col_tokens
-
-        col_end_index = col_start_idx + len(col_tokens)
-        col_name_end_index = col_start_idx + len(column.name_tokens)
-
-        early_terminate = False
-        if len(table_tokens) >= max_table_token_length:
-            table_tokens = table_tokens[:max_table_token_length]
-            col_end_index = table_tokens_start_idx + max_table_token_length
-            col_name_end_index = min(col_name_end_index, col_end_index)
-            early_terminate = True
-
-        col_spans[column.name] = {
-            'whole_span': (col_start_idx, col_end_index),
-            'column_name': (col_start_idx, col_name_end_index),
-            'first_token': (col_start_idx, col_start_idx + 1)
-        }
-
-        if early_terminate: break
-        # assert (tokens_a + tokens_b)[col_start_idx] == column.name_tokens[0]
-
-        col_start_idx += len(col_tokens)
-
-    if table_tokens[-1] == column_delimiter:
-        del table_tokens[-1]  # remove last delimiter
-
-    if config.context_first:
-        sequence = ['[CLS]'] + context_tokens + ['[SEP]'] + table_tokens + ['[SEP]']
-        segment_ids = [0] * (len(context_tokens) + 2) + [1] * (len(table_tokens) + 1)
-        question_token_ids = list(range(0, 1 + len(context_tokens)))
-    else:
-        sequence = ['[CLS]'] + table_tokens + ['[SEP]'] + context_tokens + ['[SEP]']
-        segment_ids = [0] * (len(table_tokens) + 2) + [1] * (len(context_tokens) + 1)
-        question_token_ids = list(range(len(table_tokens) + 2, len(table_tokens) + 2 + 1 + len(context_tokens)))
-
-    instance = {
-        'tokens': sequence,
-        'segment_ids': segment_ids,
-        'column_spans': col_spans,
-        'question_length': 1 + len(context_tokens),  # [CLS]/[SEP] + input question
-        'question_token_ids': question_token_ids
-    }
-
-    assert len(question_token_ids) == instance['question_length']
-
-    return instance
-
-
-class TableBERT(BertForMaskedLM):
-    def __init__(self,
-                 bert_config: BertConfig,
-                 tokenizer: BertTokenizer,
-                 column_representation='mean_pool',
-                 table_bert_config: dict = None,
-                 **kwargs):
-        BertForMaskedLM.__init__(self, bert_config)
-
-        self.column_repr_method = column_representation
-        self.tokenizer = tokenizer
-
-        table_config = self.init_config()
-        table_bert_config = table_bert_config or dict()
-        for key, val in table_bert_config.items():
-            setattr(table_config, key, val)
-
-        self.table_config = table_config
-        print('Table BERT config', file=sys.stderr)
-        print(self.table_config, file=sys.stderr)
-
-    @classmethod
-    def init_config(cls):
-        return SimpleNamespace(
-            column_delimiter='[SEP]',
-            column_item_delimiter='(',
-            use_type_text=True,
-            use_sample_value=True,
-            context_first=True
-        )
-
-    @classmethod
-    def load(
-        cls,
-        model_path: Union[str, Path],
-        config_file: Union[str, Path],
-        column_representation: str = 'mean_pool_column_name'
+class TableBertConfig(SimpleNamespace):
+    def __init__(
+        self,
+        base_model_name: str = 'bert-base-uncased',
+        column_delimiter: str = '[SEP]',
+        context_first: bool = True,
+        cell_input_template: bool = 'column|value|cell',
+        column_representation: str = 'mean_pool',
+        max_cell_value_token_num: int = 5
     ):
-        if isinstance(model_path, str):
-            model_path = Path(model_path)
-        if isinstance(config_file, str):
-            config_file = Path(config_file)
+        super(TableBertConfig, self).__init__()
 
-        state_dict = torch.load(str(model_path), map_location='cpu')
-        config = json.load(config_file.open())
+        self.base_model_name = base_model_name
+        self.column_delimiter = column_delimiter
+        self.context_first = context_first
+        self.column_representation = column_representation
+        self.max_cell_value_token_num = max_cell_value_token_num
 
-        model = cls.from_pretrained(
-            config['bert_model'],
-            state_dict=state_dict,
-            tokenizer=BertTokenizer.from_pretrained(config['bert_model']),
-            table_bert_config=config,
-            column_representation=column_representation
-        )
+        tokenizer = BertTokenizer.from_pretrained(self.base_model_name)
+        self.cell_input_template = tokenizer.tokenize(cell_input_template)
 
-        return model
+    @classmethod
+    def from_file(cls, file_path: Union[str, Path], override_args: Dict = None):
+        if isinstance(file_path, str):
+            file_path = Path(file_path)
+
+        args = json.load(file_path.open())
+        override_args = override_args or dict()
+        args.update(override_args)
+        default_config = TableBertConfig()
+        config_dict = {}
+        for key, default_val in vars(default_config).items():
+            val = args.get(key, default_val)
+            config_dict[key] = val
+
+        # backward compatibility
+        if 'column_item_delimiter' in args:
+            column_item_delimiter = args['column_item_delimiter']
+            cell_input_template = 'column'
+            use_value = args.get('use_sample_value', True)
+            use_type = args.get('use_type_text', True)
+
+            if use_value:
+                cell_input_template += column_item_delimiter + 'value'
+            if use_type:
+                cell_input_template += column_item_delimiter + 'type'
+
+            config_dict['cell_input_template'] = cell_input_template
+
+        config = cls(**config_dict)
+
+        return config
+
+
+class TableBERT(nn.Module):
+    def __init__(
+        self,
+        bert_model: BertForPreTraining,
+        config: TableBertConfig,
+        **kwargs
+    ):
+        super(TableBERT, self).__init__()
+        self._bert_model: BertForPreTraining = bert_model
+        self.tokenizer = BertTokenizer.from_pretrained(config.base_model_name)
+        self.config = config
+
+    @property
+    def bert(self):
+        return self._bert_model.bert
+
+    @property
+    def bert_config(self):
+        return self.bert.config
 
     @property
     def output_size(self):
@@ -216,13 +148,40 @@ class TableBERT(BertForMaskedLM):
     def device(self):
         return next(self.parameters()).device
 
+    @classmethod
+    def load(
+        cls,
+        model_path: Union[str, Path],
+        config_file: Union[str, Path],
+        **override_config: Dict
+    ):
+        if model_path and isinstance(model_path, str):
+            model_path = Path(model_path)
+        if isinstance(config_file, str):
+            config_file = Path(config_file)
+
+        if model_path:
+            state_dict = torch.load(str(model_path), map_location='cpu')
+        else:
+            state_dict = None
+
+        config = TableBertConfig.from_file(config_file, override_config)
+        bert_model = BertForPreTraining.from_pretrained(
+            config.base_model_name,
+            state_dict=state_dict
+        )
+
+        model = cls(bert_model, config)
+
+        return model
+
     def encode_context_and_table(
         self,
         input_ids: torch.Tensor,
         segment_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        question_token_ids: torch.Tensor,
-        question_token_mask: torch.Tensor,
+        context_token_indices: torch.Tensor,
+        context_token_mask: torch.Tensor,
         column_token_mask: torch.Tensor,
         column_token_to_column_id: torch.Tensor,
         column_mask: torch.Tensor,
@@ -255,50 +214,158 @@ class TableBERT(BertForMaskedLM):
                                                     column_token_to_column_id,
                                                     column_token_mask,
                                                     column_mask,
-                                                    aggregator=self.column_repr_method)
-
-        max_question_len = question_token_mask.sum(dim=-1).max().int()
+                                                    aggregator=self.config.column_representation)
 
         # (batch_size, context_len, encoding_size)
         context_encoding = torch.gather(
             sequence_output,
             dim=1,
-            index=question_token_ids.unsqueeze(-1).expand(-1, -1, sequence_output.size(-1)),
+            index=context_token_indices.unsqueeze(-1).expand(-1, -1, sequence_output.size(-1)),
         )
-        context_encoding = context_encoding * question_token_mask.unsqueeze(-1)
+        context_encoding = context_encoding * context_token_mask.unsqueeze(-1)
 
         return context_encoding, column_encoding
 
-    def to_tensor_dict(self, examples: List[Example]):
+    def get_cell_bert_input_tokens(
+        self,
+        column: Column,
+        cell_value: List[str],
+        token_offset: int
+    ):
+        input = []
+        span_map = {
+            'first_token': (token_offset, token_offset + 1)
+        }
+
+        for token in self.config.cell_input_template:
+            start_token_abs_position = len(input) + token_offset
+            if token == 'column':
+                span_map['column_name'] = (start_token_abs_position,
+                                           start_token_abs_position + len(column.name_tokens))
+                input.extend(column.name_tokens)
+            elif token == 'value':
+                span_map['value'] = (start_token_abs_position,
+                                     start_token_abs_position + len(cell_value))
+                input.extend(cell_value)
+            elif token == 'type':
+                span_map['type'] = (start_token_abs_position,
+                                    start_token_abs_position + len(cell_value))
+                input.append(column.type)
+            else:
+                input.append(token)
+
+        span_map['whole_span'] = (token_offset, token_offset + len(input))
+
+        return input, span_map
+
+    def convert_row_to_bert_input(
+        self,
+        context_tokens: List[str],
+        row_data: Dict,
+        header: List[Column],
+    ) -> Dict:
+
+        if self.config.context_first:
+            table_tokens_start_idx = len(context_tokens) + 2  # account for [CLS] and [SEP]
+            # account for [CLS] and [SEP], and the ending [SEP]
+            max_table_token_length = MAX_BERT_INPUT_LENGTH - len(context_tokens) - 2 - 1
+        else:
+            table_tokens_start_idx = 1  # account for starting [CLS]
+            # account for [CLS] and [SEP], and the ending [SEP]
+            max_table_token_length = MAX_BERT_INPUT_LENGTH - len(context_tokens) - 2 - 1
+
+        # generate table tokens
+        row_input_tokens = []
+        column_token_span_maps = {}
+        column_start_idx = table_tokens_start_idx
+
+        for col_id, column in enumerate(header):
+            value_tokens = row_data[column.name]
+            truncated_value_tokens = value_tokens[:self.config.max_cell_value_token_num]
+
+            column_input_tokens, token_span_map = self.get_cell_bert_input_tokens(
+                column,
+                truncated_value_tokens,
+                token_offset=column_start_idx
+            )
+
+            if len(row_input_tokens) + len(column_input_tokens) > max_table_token_length:
+                break
+
+            row_input_tokens.extend(column_input_tokens)
+            column_start_idx = column_start_idx + len(column_input_tokens)
+            column_token_span_maps[column.name] = token_span_map
+
+        if row_input_tokens[-1] == self.config.column_delimiter:
+            del row_input_tokens[-1]
+
+        if self.config.context_first:
+            sequence = ['[CLS]'] + context_tokens + ['[SEP]'] + row_input_tokens + ['[SEP]']
+            segment_ids = [0] * (len(context_tokens) + 2) + [1] * (len(row_input_tokens) + 1)
+            context_token_indices = list(range(0, 1 + len(context_tokens)))
+        else:
+            sequence = ['[CLS]'] + row_input_tokens + ['[SEP]'] + context_tokens + ['[SEP]']
+            segment_ids = [0] * (len(row_input_tokens) + 2) + [1] * (len(context_tokens) + 1)
+            context_token_indices = list(range(len(row_input_tokens) + 2, len(row_input_tokens) + 2 + 1 + len(context_tokens)))
+
+        instance = {
+            'tokens': sequence,
+            'segment_ids': segment_ids,
+            'column_spans': column_token_span_maps,
+            'context_length': 1 + len(context_tokens),  # [CLS]/[SEP] + input question
+            'context_token_indices': context_token_indices
+        }
+
+        assert len(context_token_indices) == instance['context_length']
+
+        return instance
+
+    def convert_example_to_bert_input(
+        self,
+        example: Example
+    ) -> Dict:
+        pseudo_row = {column.name: column.sample_value_tokens for column in example.table.header}
+        instance = self.convert_row_to_bert_input(example.question, pseudo_row, example.table.header)
+
+        return instance
+
+    # noinspection PyUnboundLocalVariable
+    def to_tensor_dict(self,
+        examples: List[Example], table_specific_tensors=True
+    ):
         instances = []
         for e_id, example in enumerate(examples):
-            instance = convert_example_to_bert_input(example, self.table_config)
+            instance = self.convert_example_to_bert_input(example)
             instances.append(instance)
 
         batch_size = len(examples)
         max_sequence_len = max(len(x['tokens']) for x in instances)
-        max_column_num = max(len(x['column_spans']) for x in instances)
-        max_question_len = max(x['question_length'] for x in instances)
 
+        # basic tensors
         input_array = np.zeros((batch_size, max_sequence_len), dtype=np.int)
         mask_array = np.zeros((batch_size, max_sequence_len), dtype=np.bool)
         segment_array = np.zeros((batch_size, max_sequence_len), dtype=np.bool)
 
-        question_token_ids = np.zeros((batch_size, max_question_len), dtype=np.int)
-        question_token_mask = np.zeros((batch_size, max_question_len), dtype=np.bool)
-        column_token_mask = np.zeros((batch_size, max_sequence_len), dtype=np.bool)
+        # table specific tensors
+        if table_specific_tensors:
+            max_column_num = max(len(x['column_spans']) for x in instances)
+            max_context_len = max(x['context_length'] for x in instances)
 
-        # we initialize the mapping with the id of last column as the "garbage collection" entry for reduce ops
-        column_token_to_column_id = np.zeros((batch_size, max_sequence_len), dtype=np.int)
-        column_token_to_column_id.fill(max_column_num)
+            context_token_indices = np.zeros((batch_size, max_context_len), dtype=np.int)
+            context_mask = np.zeros((batch_size, max_context_len), dtype=np.bool)
+            column_token_mask = np.zeros((batch_size, max_sequence_len), dtype=np.bool)
 
-        column_mask = np.zeros((batch_size, max_column_num), dtype=np.bool)
+            # we initialize the mapping with the id of last column as the "garbage collection" entry for reduce ops
+            column_token_to_column_id = np.zeros((batch_size, max_sequence_len), dtype=np.int)
+            column_token_to_column_id.fill(max_column_num)
 
-        column_span = 'whole_span'
-        if 'column_name' in self.column_repr_method:
-            column_span = 'column_name'
-        elif 'first_token' in self.column_repr_method:
-            column_span = 'first_token'
+            column_mask = np.zeros((batch_size, max_column_num), dtype=np.bool)
+
+            column_span = 'whole_span'
+            if 'column_name' in self.config.column_representation:
+                column_span = 'column_name'
+            elif 'first_token' in self.config.column_representation:
+                column_span = 'first_token'
 
         for i, instance in enumerate(instances):
             token_ids = self.tokenizer.convert_tokens_to_ids(instance['tokens'])
@@ -308,28 +375,33 @@ class TableBERT(BertForMaskedLM):
             segment_array[i, :len(segment_ids)] = segment_ids
             mask_array[i, :len(token_ids)] = 1.
 
-            question_token_ids[i, :instance['question_length']] = instance['question_token_ids']
-            question_token_mask[i, :instance['question_length']] = 1.
+            if table_specific_tensors:
+                context_token_indices[i, :instance['context_length']] = instance['context_token_indices']
+                context_mask[i, :instance['context_length']] = 1.
 
-            header = examples[i].table.header
-            for col_id, column in enumerate(header):
-                if column.name in instance['column_spans']:
-                    col_start, col_end = instance['column_spans'][column.name][column_span]
+                header = examples[i].table.header
+                for col_id, column in enumerate(header):
+                    if column.name in instance['column_spans']:
+                        col_start, col_end = instance['column_spans'][column.name][column_span]
 
-                    column_token_to_column_id[i, col_start: col_end] = col_id
-                    column_token_mask[i, col_start: col_end] = 1.
-                    column_mask[i, col_id] = 1.
+                        column_token_to_column_id[i, col_start: col_end] = col_id
+                        column_token_mask[i, col_start: col_end] = 1.
+                        column_mask[i, col_id] = 1.
 
         tensor_dict = {
             'input_ids': torch.tensor(input_array.astype(np.int64)),
             'segment_ids': torch.tensor(segment_array.astype(np.int64)),
             'attention_mask': torch.tensor(mask_array, dtype=torch.float32),
-            'question_token_ids': torch.tensor(question_token_ids.astype(np.int64)),
-            'question_token_mask': torch.tensor(question_token_mask, dtype=torch.float32),
-            'column_token_to_column_id': torch.tensor(column_token_to_column_id.astype(np.int64)),
-            'column_token_mask': torch.tensor(column_token_mask, dtype=torch.float32),
-            'column_mask': torch.tensor(column_mask, dtype=torch.float32)
         }
+
+        if table_specific_tensors:
+            tensor_dict.update({
+                'context_token_indices': torch.tensor(context_token_indices.astype(np.int64)),
+                'context_token_mask': torch.tensor(context_mask, dtype=torch.float32),
+                'column_token_to_column_id': torch.tensor(column_token_to_column_id.astype(np.int64)),
+                'column_token_mask': torch.tensor(column_token_mask, dtype=torch.float32),
+                'column_mask': torch.tensor(column_mask, dtype=torch.float32)
+            })
 
         # for instance in instances:
         #     print(instance)
@@ -352,26 +424,6 @@ class TableBERT(BertForMaskedLM):
         }
 
         return context_encoding, column_encoding, info
-
-    @classmethod
-    def build(cls, model_path):
-        if isinstance(model_path, str):
-            model_path = Path(model_path)
-
-        output_config_file = model_path.parent / CONFIG_NAME
-        print(f'BERT config file: {output_config_file}', file=sys.stderr)
-        bert_config = BertConfig(str(output_config_file))
-
-        config_file = model_path.parent / 'config.json'
-        print(f'Model config file: {config_file}', file=sys.stderr)
-        config = json.load(config_file.open())
-        model = cls(bert_config, **config)
-
-        print(f'model file: {model_path}', file=sys.stderr)
-        model.load_state_dict(torch.load(str(model_path), map_location=lambda storage, location: storage),
-                              strict=False)
-
-        return model
 
 
 class ContentEncodingTableBERT(TableBERT):
@@ -455,7 +507,7 @@ class ContentEncodingTableBERT(TableBERT):
 
         example_first_row_indices = row_tensor_dict['example_first_row_id']
         # (batch_size, context_len)
-        context_mask = row_tensor_dict['question_token_mask'][example_first_row_indices]
+        context_mask = row_tensor_dict['context_token_mask'][example_first_row_indices]
 
         context_encoding = {
             'value': context_encoding,

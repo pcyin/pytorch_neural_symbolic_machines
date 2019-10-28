@@ -38,7 +38,7 @@ class BertDecoder(DecoderBase):
 
         self.hidden_size = hidden_size
         self.decoder_cell_init_linear = nn.Linear(
-            encoder.bert_model.config.hidden_size,
+            encoder.bert_model.bert_config.hidden_size,
             hidden_size)
 
         self.rnn_cell = MultiLayerDropoutLSTMCell(

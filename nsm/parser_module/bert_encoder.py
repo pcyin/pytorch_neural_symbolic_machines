@@ -66,7 +66,7 @@ class BertEncoder(EncoderBase):
     def init_weights(self):
         def _init_weights(module):
             if isinstance(module, (nn.Linear, nn.Embedding)):
-                module.weight.data.normal_(mean=0.0, std=self.bert_model.config.initializer_range)
+                module.weight.data.normal_(mean=0.0, std=self.bert_model.bert_config.initializer_range)
             if isinstance(module, nn.Linear) and module.bias is not None:
                 module.bias.data.zero_()
 
@@ -80,31 +80,30 @@ class BertEncoder(EncoderBase):
         for module in modules:
             module.apply(_init_weights)
 
+    @staticmethod
+    def get_table_bert_model(config, table_bert_cls):
+        tb_path = config.get('table_bert_model')
+
+        if tb_path:
+            print(f'Loading table BERT model {tb_path}', file=sys.stderr)
+            tb_path = Path(tb_path)
+            tb_config_file = tb_path.parent / 'tb_config.json'
+        else:
+            tb_config_file = config['table_bert_config_file']
+            tb_path = None
+
+        table_bert_model = table_bert_cls.load(
+            tb_path,
+            tb_config_file,
+            column_representation=config.get('column_representation', 'mean_pool')
+        )
+
+        return table_bert_model
+
     @classmethod
     def build(cls, config, table_bert_model=None):
         if table_bert_model is None:
-            tb_path = config.get('table_bert_model')
-            tb_state_dict = None
-
-            if tb_path:
-                print(f'Loading table BERT model {tb_path}', file=sys.stderr)
-                tb_state_dict = torch.load(tb_path, map_location='cpu')
-                tb_path = Path(tb_path)
-                tb_config = json.load((tb_path.parent / 'tb_config.json').open())
-
-                # the bert model config is from the training config file
-                table_bert_model = tb_config['bert_model'] = json.load((tb_path.parent / 'config.json').open())['bert_model']
-            else:
-                tb_config = json.load(open(config['table_bert_config_file']))
-                table_bert_model = config['bert_model']
-
-            table_bert_model = TableBERT.from_pretrained(
-                table_bert_model,
-                state_dict=tb_state_dict,
-                tokenizer=BertTokenizer.from_pretrained(config['bert_model']),
-                table_bert_config=tb_config,
-                column_representation=config.get('column_representation', 'mean_pool')
-            )
+            table_bert_model = cls.get_table_bert_model(config, TableBERT)
 
         return cls(
             table_bert_model,
@@ -172,7 +171,7 @@ class BertEncoder(EncoderBase):
 
         # remove leading [CLS] symbol
         question_encoding = table_bert_encoding['question_encoding'][:, 1:]
-        question_mask = table_bert_encoding['question_token_mask'][:, 1:]
+        question_mask = table_bert_encoding['context_token_mask'][:, 1:]
         cls_encoding = table_bert_encoding['question_encoding'][:, 0]
 
         canonical_column_encoding = table_column_encoding = table_bert_encoding['column_encoding']
@@ -201,7 +200,7 @@ class BertEncoder(EncoderBase):
             raw_column_mask = np.zeros((batch_size, constant_value_num), dtype=np.float32)
 
             for e_id, context in enumerate(env_context):
-                column_info = context['table'].header
+                column_info = context['table'].column_info
                 raw_columns = column_info['raw_columns']
                 valid_column_num = min(constant_value_num, len(raw_columns))
                 raw_column_canonical_ids[e_id, :valid_column_num] = column_info['raw_column_canonical_ids'][:valid_column_num]

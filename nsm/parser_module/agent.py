@@ -44,6 +44,10 @@ class PGAgent(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
+    @property
+    def sufficient_context_encoding_entries(self):
+        return ['question_encoding', 'question_mask', 'question_encoding_att_linear']
+
     def encode(self, env_context):
         return self.encoder.encode(env_context)
 

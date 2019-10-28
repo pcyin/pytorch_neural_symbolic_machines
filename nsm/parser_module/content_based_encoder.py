@@ -11,7 +11,7 @@ from torch import nn as nn
 from nsm.parser_module.bert_encoder import BertEncoder
 from nsm.parser_module.encoder import EncoderBase, ContextEncoding, COLUMN_TYPES
 from table.bert.data_model import Example
-from table.bert.model import TableBERT, ContentEncodingTableBERT
+from table.bert.model import TableBERT, ContentEncodingTableBERT, TableBertConfig
 
 
 class ContentBasedEncoder(BertEncoder):
@@ -53,28 +53,7 @@ class ContentBasedEncoder(BertEncoder):
     @classmethod
     def build(cls, config, table_bert_model=None):
         if table_bert_model is None:
-            tb_path = config.get('table_bert_model')
-            tb_state_dict = None
-
-            if tb_path:
-                print(f'Loading table BERT model {tb_path}', file=sys.stderr)
-                tb_state_dict = torch.load(tb_path, map_location='cpu')
-                tb_path = Path(tb_path)
-                tb_config = json.load((tb_path.parent / 'tb_config.json').open())
-
-                # the bert model config is from the training config file
-                table_bert_model = tb_config['bert_model'] = json.load((tb_path.parent / 'config.json').open())['bert_model']
-            else:
-                tb_config = json.load(open(config['table_bert_config_file']))
-                table_bert_model = config['bert_model']
-
-            table_bert_model = ContentEncodingTableBERT.from_pretrained(
-                table_bert_model,
-                state_dict=tb_state_dict,
-                tokenizer=BertTokenizer.from_pretrained(config['bert_model']),
-                table_bert_config=tb_config,
-                column_representation=config.get('column_representation', 'mean_pool')
-            )
+            table_bert_model = cls.get_table_bert_model(config, ContentEncodingTableBERT)
 
         return cls(
             table_bert_model,

@@ -1,4 +1,6 @@
 from collections import namedtuple
+from typing import List, Dict
+
 
 Example = namedtuple('Example', ['question', 'table'])
 
@@ -31,7 +33,7 @@ class Table(object):
     def __init__(self, id, header, data=None, **kwargs):
         self.id = id
         self.header = header
-        self.data = data
+        self.data: List[Dict] = data
         self.fields = []
 
         for key, val in kwargs.items():
