@@ -1,5 +1,6 @@
 import json
 import sys
+from collections import namedtuple
 from pathlib import Path
 from typing import Dict, List, Any
 
@@ -9,8 +10,12 @@ from pytorch_pretrained_bert import BertTokenizer
 from torch import nn as nn
 
 from nsm.parser_module.encoder import EncoderBase, ContextEncoding, COLUMN_TYPES
-from table.bert.data_model import Example
-from table.bert.model import TableBERT
+
+from table_bert.vanilla_table_bert import VanillaTableBert
+# from table.bert.data_model import Example
+# from table.bert.model import TableBERT
+
+Example = namedtuple('Example', ['question', 'table'])
 
 
 class BertEncoder(EncoderBase):
@@ -103,7 +108,7 @@ class BertEncoder(EncoderBase):
     @classmethod
     def build(cls, config, table_bert_model=None):
         if table_bert_model is None:
-            table_bert_model = cls.get_table_bert_model(config, TableBERT)
+            table_bert_model = cls.get_table_bert_model(config, VanillaTableBert)
 
         return cls(
             table_bert_model,
@@ -153,7 +158,15 @@ class BertEncoder(EncoderBase):
 
     def _bert_encode(self, env_context: List[Dict]) -> Any:
         question_encoding, table_column_encoding, info = self.bert_model.encode(
-            [Example(question=e['question_tokens'], table=e['table']) for e in env_context]
+            contexts=[
+                e['question_tokens']
+                for e in env_context
+            ],
+            tables=[
+                e['table']
+                for e in env_context
+            ]
+            # [Example(question=e['question_tokens'], table=e['table']) for e in env_context]
         )
 
         table_bert_encoding = {

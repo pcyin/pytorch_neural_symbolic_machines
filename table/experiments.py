@@ -46,7 +46,8 @@ import multiprocessing
 from docopt import docopt
 
 from nsm.program_cache import SharedProgramCache
-from table.bert.data_model import Column
+# from table.bert.data_model import Column
+from table_bert.dataset import Column
 
 
 def annotate_example_for_bert(example: Dict, table: Dict, bert_tokenizer: BertTokenizer, args: Dict):

@@ -10,8 +10,9 @@ from torch import nn as nn
 
 from nsm.parser_module.bert_encoder import BertEncoder
 from nsm.parser_module.encoder import EncoderBase, ContextEncoding, COLUMN_TYPES
-from table.bert.data_model import Example
-from table.bert.model import TableBERT, ContentEncodingTableBERT, TableBertConfig
+#from table.bert.data_model import Example
+#from table.bert.model import TableBERT, ContentEncodingTableBERT, TableBertConfig
+from table_bert.content_table_bert import ContentBasedTableBert
 
 
 class ContentBasedEncoder(BertEncoder):
@@ -53,7 +54,7 @@ class ContentBasedEncoder(BertEncoder):
     @classmethod
     def build(cls, config, table_bert_model=None):
         if table_bert_model is None:
-            table_bert_model = cls.get_table_bert_model(config, ContentEncodingTableBERT)
+            table_bert_model = cls.get_table_bert_model(config, ContentBasedTableBert)
 
         return cls(
             table_bert_model,
@@ -68,13 +69,15 @@ class ContentBasedEncoder(BertEncoder):
         )
 
     def _bert_encode(self, env_context: List[Dict]) -> Any:
-        question_encoding, table_encoding, info = self.bert_model.encode([
-            Example(
-                question=e['question_tokens'],
-                table=e['table'].with_rows(e['table'].data[:self.max_row_num])
-            )
-            for e in env_context
-        ])
+        question_encoding, table_encoding, info = self.bert_model.encode(
+            [e['question_tokens'] for e in env_context],
+            [e['table'].with_rows(e['table'].data[:self.max_row_num]) for e in env_context]
+            # [Example(
+            #     question=e['question_tokens'],
+            #     table=e['table'].with_rows(e['table'].data[:self.max_row_num])
+            # )
+            # for e in env_context]
+        )
 
         return question_encoding, table_encoding, info['tensor_dict']
 

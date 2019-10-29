@@ -6,6 +6,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.utils
+from table_bert.vanilla_table_bert import VanillaTableBert
 from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence
 import numpy as np
 
@@ -21,8 +22,6 @@ from nsm.env_factory import Environment, Trajectory
 from nsm.executor_factory import SimpleKGExecutor, TableExecutor
 from nsm.parser_module.bert_encoder import BertEncoder
 from nsm.sketch.sketch import Sketch
-from table.bert.data_model import Example
-from table.bert.model import TableBERT
 
 SketchEncoding = Dict[str, torch.Tensor]
 
@@ -196,20 +195,7 @@ class SketchPredictor(nn.Module):
             if params['sketch_decoder_use_parser_table_bert']:
                 bert_model = kwargs['encoder'].bert_model
             else:
-                tb_path = params.get('table_bert_model')
-                if tb_path:
-                    tb_path = Path(tb_path)
-                    bert_model = TableBERT.load(
-                        tb_path, tb_path.parent / 'tb_config.json',
-                        column_representation=params['column_representation']
-                    )
-                else:
-                    bert_model = TableBERT.from_pretrained(
-                        params['bert_model'],
-                        tokenizer=BertTokenizer.from_pretrained(params['bert_model']),
-                        table_bert_config=json.load(open(params['table_bert_config_file'])),
-                        column_representation=params['column_representation']
-                    )
+                bert_model = BertEncoder.get_table_bert_model(config, VanillaTableBert)
         else:
             bert_model = BertModel.from_pretrained(params['bert_model'])
 
