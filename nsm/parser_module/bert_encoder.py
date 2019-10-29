@@ -7,6 +7,7 @@ from typing import Dict, List, Any
 import numpy as np
 import torch
 from pytorch_pretrained_bert import BertTokenizer
+from table_bert.vertical_attention_table_bert import VerticalAttentionTableBert
 from torch import nn as nn
 
 from nsm.parser_module.encoder import EncoderBase, ContextEncoding, COLUMN_TYPES
@@ -108,7 +109,7 @@ class BertEncoder(EncoderBase):
     @classmethod
     def build(cls, config, table_bert_model=None):
         if table_bert_model is None:
-            table_bert_model = cls.get_table_bert_model(config, VanillaTableBert)
+            table_bert_model = cls.get_table_bert_model(config, VerticalAttentionTableBert)
 
         return cls(
             table_bert_model,
@@ -163,17 +164,18 @@ class BertEncoder(EncoderBase):
                 for e in env_context
             ],
             tables=[
-                e['table']
+                e['table'].with_rows(e['table'].data[:3])
                 for e in env_context
             ]
-            # [Example(question=e['question_tokens'], table=e['table']) for e in env_context]
         )
 
         table_bert_encoding = {
-            'question_encoding': question_encoding,
-            'column_encoding': table_column_encoding,
+            'question_encoding': question_encoding['value'],
+            'column_encoding': table_column_encoding['value'],
         }
         table_bert_encoding.update(info['tensor_dict'])
+        table_bert_encoding['context_token_mask'] = question_encoding['mask']
+        table_bert_encoding['column_mask'] = table_column_encoding['mask']
 
         return table_bert_encoding
 
