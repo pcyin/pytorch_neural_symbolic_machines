@@ -120,7 +120,7 @@ class Evaluator(torch_mp.Process):
                                  vocab_file=self.config['vocab_file'],
                                  en_vocab_file=self.config['en_vocab_file'],
                                  embedding_file=self.config['embedding_file'],
-                                 bert_model=self.config['bert_model'],
+                                 bert_tokenizer=self.agent.encoder.bert_model.tokenizer,
                                  config=self.config)
         for env in envs:
             env.use_cache = False

@@ -66,6 +66,13 @@ class Actor(torch_mp.Process):
             return os.path.join(
                 self.config['train_shard_dir'], self.config['train_shard_prefix'] + str(i) + '.jsonl')
 
+        # create agent and set it to evaluation mode
+        if 'cuda' in str(self.device.type):
+            torch.cuda.set_device(self.device)
+
+        agent_name = self.config.get('parser', 'vanilla')
+        self.agent = get_parser_agent_by_name(agent_name).build(self.config).to(self.device).eval()
+
         # load environments
         self.load_environments(
             [
@@ -84,13 +91,6 @@ class Actor(torch_mp.Process):
                                                       alpha=float(self.config['consistency_alpha']),
                                                       log_file=os.path.join(self.config['work_dir'], f'consistency_model_actor_{self.actor_id}.log'),
                                                       debug=self.actor_id == 0)
-
-        # create agent and set it to evaluation mode
-        if 'cuda' in str(self.device.type):
-            torch.cuda.set_device(self.device)
-
-        agent_name = self.config.get('parser', 'vanilla')
-        self.agent = get_parser_agent_by_name(agent_name).build(self.config).to(self.device).eval()
 
         self.replay_buffer = ReplayBuffer(self.agent, self.shared_program_cache)
 
@@ -386,7 +386,7 @@ class Actor(torch_mp.Process):
                                  vocab_file=self.config['vocab_file'],
                                  en_vocab_file=self.config['en_vocab_file'],
                                  embedding_file=self.config['embedding_file'],
-                                 bert_model=self.config['bert_model'],
+                                 bert_tokenizer=self.agent.encoder.bert_model.tokenizer,
                                  config=self.config)
 
         setattr(self, 'environments', envs)

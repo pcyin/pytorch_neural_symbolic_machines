@@ -7,7 +7,8 @@ from typing import Dict, List, Any
 import numpy as np
 import torch
 from pytorch_pretrained_bert import BertTokenizer
-from table_bert.vertical_attention_table_bert import VerticalAttentionTableBert
+from table_bert.table_bert import TableBertModel
+from table_bert.vertical.vertical_attention_table_bert import VerticalAttentionTableBert
 from torch import nn as nn
 
 from nsm.parser_module.encoder import EncoderBase, ContextEncoding, COLUMN_TYPES
@@ -87,29 +88,39 @@ class BertEncoder(EncoderBase):
             module.apply(_init_weights)
 
     @staticmethod
-    def get_table_bert_model(config, table_bert_cls):
+    def get_table_bert_model(config):
         tb_path = config.get('table_bert_model')
 
-        if tb_path:
+        if tb_path in ('vertical', 'vanilla'):
+            tb_config_file = config['table_bert_config_file']
+            table_bert_cls = {
+                'vertical': VerticalAttentionTableBert,
+                'vanilla': VanillaTableBert
+            }[tb_path]
+            tb_path = None
+        else:
             print(f'Loading table BERT model {tb_path}', file=sys.stderr)
             tb_path = Path(tb_path)
             tb_config_file = tb_path.parent / 'tb_config.json'
-        else:
-            tb_config_file = config['table_bert_config_file']
-            tb_path = None
+            table_bert_cls = TableBertModel
 
         table_bert_model = table_bert_cls.load(
             tb_path,
             tb_config_file,
-            column_representation=config.get('column_representation', 'mean_pool')
         )
+
+        if type(table_bert_model) == VanillaTableBert:
+            table_bert_model.config.column_representation = config.get('column_representation', 'mean_pool')
+
+        print('Table Bert Config', file=sys.stderr)
+        print(json.dumps(vars(table_bert_model.config), indent=2), file=sys.stderr)
 
         return table_bert_model
 
     @classmethod
     def build(cls, config, table_bert_model=None):
         if table_bert_model is None:
-            table_bert_model = cls.get_table_bert_model(config, VerticalAttentionTableBert)
+            table_bert_model = cls.get_table_bert_model(config)
 
         return cls(
             table_bert_model,
@@ -164,18 +175,24 @@ class BertEncoder(EncoderBase):
                 for e in env_context
             ],
             tables=[
-                e['table'].with_rows(e['table'].data[:3])
+                e['table'].with_rows(e['table'].data[:self.bert_model.config.sample_row_num])
                 for e in env_context
             ]
         )
 
+        # table_bert_encoding = {
+        #     'question_encoding': question_encoding['value'],
+        #     'column_encoding': table_column_encoding['value'],
+        # }
+
         table_bert_encoding = {
-            'question_encoding': question_encoding['value'],
-            'column_encoding': table_column_encoding['value'],
+            'question_encoding': question_encoding,
+            'column_encoding': table_column_encoding
         }
+
         table_bert_encoding.update(info['tensor_dict'])
-        table_bert_encoding['context_token_mask'] = question_encoding['mask']
-        table_bert_encoding['column_mask'] = table_column_encoding['mask']
+        # table_bert_encoding['context_token_mask'] = question_encoding['mask']
+        # table_bert_encoding['column_mask'] = table_column_encoding['mask']
 
         return table_bert_encoding
 

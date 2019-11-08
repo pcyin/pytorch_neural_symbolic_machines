@@ -228,7 +228,7 @@ def get_sample_value(raw_column_name, table, bert_tokenizer):
 def load_environments(example_files: List[str], table_file: str, vocab_file: str, en_vocab_file: str,
                       embedding_file: str, config: Dict,
                       example_ids: Iterable = None,
-                      column_annotation_file: str = None, bert_model: str = None):
+                      column_annotation_file: str = None, bert_tokenizer: BertTokenizer = None):
     dataset = []
     if example_ids is not None:
         example_ids = set(example_ids)
@@ -259,11 +259,6 @@ def load_environments(example_files: List[str], table_file: str, vocab_file: str
     print('{} unique tokens in encoder vocab'.format(
         len(en_vocab.vocab)))
     print('{} examples in the dataset'.format(len(dataset)))
-
-    # Create environments.
-    bert_tokenizer = None
-    if bert_model:
-        bert_tokenizer = BertTokenizer.from_pretrained(bert_model)
 
     environments = create_environments(
         table_dict, dataset, en_vocab, embedding_model,
