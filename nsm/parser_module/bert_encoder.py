@@ -169,15 +169,31 @@ class BertEncoder(EncoderBase):
         return batch_dict
 
     def _bert_encode(self, env_context: List[Dict]) -> Any:
+        contexts = []
+        tables = []
+        for e in env_context:
+            contexts.append(e['question_tokens'])
+
+            if self.training:
+                sampled_rows = [
+                    e['table'].data[idx]
+                    for idx
+                    in sorted(
+                        np.random.choice(
+                            list(range(len(e['table']))),
+                            replace=False,
+                            size=self.bert_model.config.sample_row_num
+                        )
+                    )
+                ]
+            else:
+                sampled_rows = e['table'].data[:self.bert_model.config.sample_row_num]
+
+            table = e['table'].with_rows(sampled_rows)
+            tables.append(table)
+
         question_encoding, table_column_encoding, info = self.bert_model.encode(
-            contexts=[
-                e['question_tokens']
-                for e in env_context
-            ],
-            tables=[
-                e['table'].with_rows(e['table'].data[:self.bert_model.config.sample_row_num])
-                for e in env_context
-            ]
+            contexts, tables
         )
 
         # table_bert_encoding = {
