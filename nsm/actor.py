@@ -113,7 +113,9 @@ class Actor(torch_mp.Process):
         log_dir = work_dir / 'log'
         log_dir.mkdir(exist_ok=True, parents=True)
 
-        debug_file = (log_dir / f'debug.actor{self.actor_id}.log').open('w')
+        debug_file = None
+        if self.config.get('save_actor_log', False):
+            debug_file = (log_dir / f'debug.actor{self.actor_id}.log').open('w')
         # self.agent.log = debug_file
 
         with torch.no_grad():
@@ -155,8 +157,9 @@ class Actor(torch_mp.Process):
                                             log_file=None
                                         )
 
-                                        print(f"Question {env.name} Candidate sketches in the cache:\n"
-                                              f"{json.dumps({str(k): v for k, v in env_candidate_sketches.items()}, indent=2, default=str)}", file=debug_file)
+                                        if debug_file:
+                                            print(f"Question {env.name} Candidate sketches in the cache:\n"
+                                                  f"{json.dumps({str(k): v for k, v in env_candidate_sketches.items()}, indent=2, default=str)}", file=debug_file)
 
                                         env_candidate_sketches = sorted(
                                             env_candidate_sketches,
@@ -166,17 +169,16 @@ class Actor(torch_mp.Process):
                                     constraint_sketches[env.name] = env_candidate_sketches
 
                                 # logging
-                                print(f'Found candidate sketches took {time.time() - t1}s', file=debug_file)
                                 if debug_file:
+                                    print(f'Found candidate sketches took {time.time() - t1}s', file=debug_file)
                                     for env in batched_envs:
                                         print("======", file=debug_file)
                                         print(f"Question [{env.name}] "
                                               f"{env.question_annotation['question']}", file=debug_file)
 
-                                        env_candidate_sketches = constraint_sketches[env.name]
                                         print(
                                             f"Selected sketches for [{env.name}]:\n"
-                                            f"{json.dumps(env_candidate_sketches, indent=2, default=str)}",
+                                            f"{json.dumps(constraint_sketches[env.name], indent=2, default=str)}",
                                             file=debug_file
                                         )
 
@@ -200,12 +202,13 @@ class Actor(torch_mp.Process):
                             )
                         t2 = time.time()
 
-                        print('Explored programs:', file=debug_file)
-                        for sample in explore_samples:
-                            print(f"[{sample.trajectory.environment_name}] "
-                                  f"{' '.join(sample.trajectory.program)} "
-                                  f"(prob={sample.prob:.4f}, correct={sample.trajectory.reward == 1.})",
-                                  file=debug_file)
+                        if debug_file:
+                            print('Explored programs:', file=debug_file)
+                            for sample in explore_samples:
+                                print(f"[{sample.trajectory.environment_name}] "
+                                      f"{' '.join(sample.trajectory.program)} "
+                                      f"(prob={sample.prob:.4f}, correct={sample.trajectory.reward == 1.})",
+                                      file=debug_file)
 
                         print(
                             f'[Actor {self.actor_id}] '
@@ -228,27 +231,27 @@ class Actor(torch_mp.Process):
                             replay_constraint_sketches = dict()
                             num_sketches_per_example = config.get('num_candidate_sketches', 5)
 
-                            for env in batched_envs:
-                                print("======begin sketch guided reply======", file=debug_file)
-                                print(f"Question [{env.name}] "
-                                      f"{env.question_annotation['question']}", file=debug_file)
+                            env_candidate_sketches = self.agent.sketch_predictor.get_sketches(batched_envs)
+                            env_selected_candidate_sketches = sorted(
+                                env_candidate_sketches,
+                                key=lambda s: env_candidate_sketches[s]['score'],
+                                reverse=True)[:num_sketches_per_example]
 
-                                env_candidate_sketches = self.agent.sketch_predictor.get_sketches(batched_envs)
+                            replay_constraint_sketches[env.name] = env_selected_candidate_sketches
 
-                                print(
-                                    f"Candidate sketches in the cache:\n"
-                                    f"{json.dumps({str(k): v for k, v in env_candidate_sketches.items()}, indent=2, default=str)}",
-                                    file=debug_file
-                                )
+                            if debug_file:
+                                for env in batched_envs:
+                                    print("======begin sketch guided reply======", file=debug_file)
+                                    print(f"Question [{env.name}] "
+                                          f"{env.question_annotation['question']}", file=debug_file)
 
-                                env_selected_candidate_sketches = sorted(
-                                    env_candidate_sketches,
-                                    key=lambda s: env_candidate_sketches[s]['score'],
-                                    reverse=True)[:num_sketches_per_example]
+                                    print(
+                                        f"Candidate sketches in the cache:\n"
+                                        f"{json.dumps({str(k): v for k, v in env_candidate_sketches.items()}, indent=2, default=str)}",
+                                        file=debug_file
+                                    )
 
-                                replay_constraint_sketches[env.name] = env_selected_candidate_sketches
-
-                                print("======end sketch guided reply======", file=debug_file)
+                                    print("======end sketch guided reply======", file=debug_file)
 
                         replay_samples = self.replay_buffer.replay(
                             batched_envs,
@@ -336,7 +339,8 @@ class Actor(torch_mp.Process):
                         continue
 
                     self.check_and_load_new_model()
-                    debug_file.flush()
+                    if debug_file:
+                        debug_file.flush()
 
                     if self.device.type == 'cuda':
                         mem_cached_mb = torch.cuda.memory_cached() / 1000000
