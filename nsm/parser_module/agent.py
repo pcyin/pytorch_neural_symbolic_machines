@@ -569,15 +569,25 @@ class PGAgent(nn.Module):
         torch.save(params, model_path)
 
     @classmethod
-    def load(cls, model_path, default_values_handle, gpu_id=-1, **kwargs):
+    def load(cls, model_path, gpu_id=-1, default_values_handle=None, **kwargs):
         device = torch.device("cuda:%d" % gpu_id if gpu_id >= 0 else "cpu")
         params = torch.load(model_path, map_location=lambda storage, loc: storage)
         config = params['config']
-        default_values_handle(config)
+
+        if default_values_handle:
+            default_values_handle(config)
         config.update(kwargs)
         kwargs = params['kwargs'] if params['kwargs'] is not None else dict()
 
-        model = cls.build(config, params=params['state_dict'], **kwargs)
+        model_cls = cls
+        if config['parser'] == 'sketch':
+            from .sketch_guided_agent import SketchGuidedAgent
+            model_cls = SketchGuidedAgent
+        elif config['parser'] == 'content_based':
+            from .content_based_agent import ContentBasedAgent
+            model_cls = ContentBasedAgent
+
+        model = model_cls.build(config)
         incompatible_keys = model.load_state_dict(params['state_dict'], strict=False)
         if incompatible_keys.missing_keys:
             print('Loading agent, got missing keys {}'.format(incompatible_keys.missing_keys), file=sys.stderr)

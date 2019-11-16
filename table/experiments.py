@@ -567,7 +567,7 @@ def test(args):
                                   vocab_file=config['vocab_file'],
                                   en_vocab_file=config['en_vocab_file'],
                                   embedding_file=config['embedding_file'],
-                                  bert_model=config['bert_model'],
+                                  bert_tokenizer=agent.encoder.bert_model.tokenizer,
                                   config=config)
     for env in test_envs:
         env.use_cache = False
