@@ -615,7 +615,7 @@ def to_decode_results_dict(decode_results, test_envs):
 
 
 def main():
-    multiprocessing.set_start_method('spawn')
+    multiprocessing.set_start_method('spawn', force=True)
 
     args = docopt(__doc__)
 
