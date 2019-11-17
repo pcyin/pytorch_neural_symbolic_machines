@@ -174,24 +174,27 @@ class BertEncoder(EncoderBase):
         for e in env_context:
             contexts.append(e['question_tokens'])
 
-            if self.training:
-                sampled_rows = [
-                    e['table'].data[idx]
-                    for idx
-                    in sorted(
-                        np.random.choice(
-                            list(range(len(e['table']))),
-                            replace=False,
-                            size=self.bert_model.config.sample_row_num
+            if isinstance(self.bert_model, VerticalAttentionTableBert):
+                if self.training:
+                    sampled_rows = [
+                        e['table'].data[idx]
+                        for idx
+                        in sorted(
+                            np.random.choice(
+                                list(range(len(e['table']))),
+                                replace=False,
+                                size=self.bert_model.config.sample_row_num
+                            )
                         )
-                    )
-                ]
+                    ]
+                else:
+                    sampled_rows = e['table'].data[:self.bert_model.config.sample_row_num]
+
+                table = e['table'].with_rows(sampled_rows)
             else:
-                sampled_rows = e['table'].data[:self.bert_model.config.sample_row_num]
+                table = e['table']
 
-            table = e['table'].with_rows(sampled_rows)
             tables.append(table)
-
         question_encoding, table_column_encoding, info = self.bert_model.encode(
             contexts, tables
         )
