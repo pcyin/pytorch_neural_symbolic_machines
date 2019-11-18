@@ -104,9 +104,11 @@ class BertEncoder(EncoderBase):
             tb_config_file = tb_path.parent / 'tb_config.json'
             table_bert_cls = TableBertModel
 
+        table_bert_extra_config = config.get('table_bert_extra_config', dict())
         table_bert_model = table_bert_cls.load(
             tb_path,
             tb_config_file,
+            **table_bert_extra_config
         )
 
         if type(table_bert_model) == VanillaTableBert:
