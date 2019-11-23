@@ -234,7 +234,7 @@ class BertEncoder(EncoderBase):
         for row in table.data:
             row_data = list(row.values() if isinstance(row, dict) else row)
             for cell in row_data:
-                if ' '.join(cell) in context:
+                if ' '.join(cell) in context and len(cell) > 0:
                     candidate_rows.append(row)
                     break
 
