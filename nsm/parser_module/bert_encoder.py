@@ -14,6 +14,7 @@ from torch import nn as nn
 from nsm.parser_module.encoder import EncoderBase, ContextEncoding, COLUMN_TYPES
 
 from table_bert.vanilla_table_bert import VanillaTableBert
+from table_bert.table import Column, Table
 # from table.bert.data_model import Example
 # from table.bert.model import TableBERT
 
@@ -201,10 +202,19 @@ class BertEncoder(EncoderBase):
 
                 table = e['table'].with_rows(sampled_rows)
             else:
-                if use_question_biased_sampled_values:
-                    raise ValueError('Vanilla Table BERT does not support biased sampled value')
-
                 table = e['table']
+                if use_question_biased_sampled_values:
+                    sampled_cells = self.get_question_biased_sampled_cells(
+                        e['question_tokens'], e['table']
+                    )
+                    new_header = []
+                    for idx, column in enumerate(e['table'].header):
+                        new_column = Column(
+                            name=column.name, name_tokens=column.name_tokens, type=column.type,
+                            sample_value=sampled_cells[idx], sample_value_tokens=sampled_cells[idx]
+                        )
+                        new_header.append(new_column)
+                    table = Table(id=table.id, header=new_header, data=[])
 
             tables.append(table)
 
@@ -245,6 +255,25 @@ class BertEncoder(EncoderBase):
             candidate_rows = candidate_rows[:num_rows]
 
         return candidate_rows
+
+    def get_question_biased_sampled_cells(self, context, table):
+        context = ' '.join(context)
+        candidate_cells = [[] for _ in range(len(table.data[0]))]
+
+        for row in table.data:
+            row_data = list([row.get(col.name, []) for col in table.header] if isinstance(row, dict) else row)
+            for cell_idx, cell in enumerate(row_data):
+                if ' '.join(cell) in context and len(cell) > 0:
+                    candidate_cells[cell_idx].append(cell)
+                    break
+
+        for col_idx in range(len(candidate_cells)):
+            if len(candidate_cells[col_idx]) == 0:
+                candidate_cells[col_idx] = table.header[col_idx].sample_value_tokens
+            else:
+                candidate_cells[col_idx] = candidate_cells[col_idx][0]
+
+        return candidate_cells
 
     def encode(self, env_context: List[Dict]) -> ContextEncoding:
         batched_context = self.example_list_to_batch(env_context)
