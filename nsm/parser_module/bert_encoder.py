@@ -176,27 +176,38 @@ class BertEncoder(EncoderBase):
         for e in env_context:
             contexts.append(e['question_tokens'])
 
+            use_question_biased_sampled_values = self.config.get('use_question_biased_sampled_values', True)
             if isinstance(self.bert_model, VerticalAttentionTableBert):
-                if self.training:
-                    sampled_rows = [
-                        e['table'].data[idx]
-                        for idx
-                        in sorted(
-                            np.random.choice(
-                                list(range(len(e['table']))),
-                                replace=False,
-                                size=self.bert_model.config.sample_row_num
-                            )
-                        )
-                    ]
+                if use_question_biased_sampled_values:
+                    sampled_rows = self.get_question_biased_sampled_rows(
+                        e['question_tokens'], e['table'],
+                        num_rows=self.bert_model.config.sample_row_num
+                    )
                 else:
-                    sampled_rows = e['table'].data[:self.bert_model.config.sample_row_num]
+                    if self.training:
+                        sampled_rows = [
+                            e['table'].data[idx]
+                            for idx
+                            in sorted(
+                                np.random.choice(
+                                    list(range(len(e['table']))),
+                                    replace=False,
+                                    size=self.bert_model.config.sample_row_num
+                                )
+                            )
+                        ]
+                    else:
+                        sampled_rows = e['table'].data[:self.bert_model.config.sample_row_num]
 
                 table = e['table'].with_rows(sampled_rows)
             else:
+                if use_question_biased_sampled_values:
+                    raise ValueError('Vanilla Table BERT does not support biased sampled value')
+
                 table = e['table']
 
             tables.append(table)
+
         question_encoding, table_column_encoding, info = self.bert_model.encode(
             contexts, tables
         )
@@ -216,6 +227,24 @@ class BertEncoder(EncoderBase):
         # table_bert_encoding['column_mask'] = table_column_encoding['mask']
 
         return table_bert_encoding
+
+    def get_question_biased_sampled_rows(self, context, table, num_rows=3):
+        context = ' '.join(context)
+        candidate_rows = []
+        for row in table.data:
+            row_data = list(row.values() if isinstance(row, dict) else row)
+            for cell in row_data:
+                if ' '.join(cell) in context:
+                    candidate_rows.append(row)
+                    break
+
+        if len(candidate_rows) < num_rows:
+            k = num_rows - len(candidate_rows)
+            candidate_rows += table.data[:k]
+        else:
+            candidate_rows = candidate_rows[:num_rows]
+
+        return candidate_rows
 
     def encode(self, env_context: List[Dict]) -> ContextEncoding:
         batched_context = self.example_list_to_batch(env_context)
