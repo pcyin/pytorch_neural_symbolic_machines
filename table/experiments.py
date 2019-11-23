@@ -58,6 +58,7 @@ def annotate_example_for_bert(example: Dict, table: Dict, bert_tokenizer: BertTo
 
     # sub-tokenize the question
     question_tokens = example['tokens']
+    example['original_tokens'] = question_tokens
     token_position_map = OrderedDict()   # map of token index before and after sub-tokenization
 
     question_feature = example['features']
@@ -602,15 +603,27 @@ def test(args):
 
 def to_decode_results_dict(decode_results, test_envs):
     results = OrderedDict()
+
     for env, hyp_list in zip(test_envs, decode_results):
-        results[env.name] = []
+        env_result = {
+            'name': env.name,
+            'question': ' '.join(str(x) for x in env.context['original_tokens']),
+            'hypotheses': None
+        }
+
+        hypotheses = []
         for hyp in hyp_list:
-            results[env.name].append(OrderedDict(
-                # program=to_human_readable_program(hyp.trajectory.program, env),
-                program=hyp.trajectory.program,
+            hypotheses.append(OrderedDict(
+                program=' '.join(str(x) for x in to_human_readable_program(hyp.trajectory.program, env)),
+                # program=hyp.trajectory.program,
                 is_correct=hyp.trajectory.reward == 1.,
                 prob=hyp.prob
             ))
+
+        env_result['hypotheses'] = hypotheses
+        env_result['top_prediction_correct'] = hypotheses and hypotheses[0]['is_correct']
+        results[env.name] = env_result
+
     return results
 
 
