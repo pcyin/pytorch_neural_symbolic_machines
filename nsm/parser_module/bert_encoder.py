@@ -261,23 +261,25 @@ class BertEncoder(EncoderBase):
                     continue
 
                 row_data = list(row.values() if isinstance(row, dict) else row)
-                found = False
+
                 for cell in row_data:
+                    found = False
                     if len(cell) > 0:
                         for ngram_num in reversed(range(1, max_ngram_num + 1)):
                             for start_idx in range(0, len(cell) - ngram_num + 1):
                                 end_idx = start_idx + ngram_num
                                 ngram = cell[start_idx: end_idx]
                                 if not StringMatchUtil.all_stop_words(ngram) and StringMatchUtil.contains(context, ngram):
-                                    candidate_rows.append(row)
-                                    candidate_row_ids.append(row_id)
-                                    candidate_row_match_score[row_id] = ngram_num
+                                    candidate_row_match_score[row_id] = max(
+                                        ngram_num,
+                                        candidate_row_match_score.get(row_id, 0)
+                                    )
                                     found = True
 
                                 if found: break
                             if found: break
-                    if found: break
 
+            candidate_row_ids = [idx for idx, score in candidate_row_match_score.items() if score > 0]
             top_k_row_ids_by_match_score = sorted(candidate_row_ids, key=lambda row_id: -candidate_row_match_score[row_id])[:num_rows]
             if len(top_k_row_ids_by_match_score) < num_rows:
                 not_included_row_ids = [idx for idx in range(len(table)) if idx not in top_k_row_ids_by_match_score]
@@ -285,45 +287,52 @@ class BertEncoder(EncoderBase):
 
             top_k_row_ids_by_match_score = sorted(top_k_row_ids_by_match_score)
             candidate_rows = [table.data[idx] for idx in top_k_row_ids_by_match_score]
-
         else:
             candidate_rows = candidate_rows[:num_rows]
 
         return candidate_rows
 
     def get_question_biased_sampled_cells(self, context, table):
-        candidate_cells = [[] for _ in range(len(table.data[0]))]
+        candidate_cells = [[] for column in table.header]
 
         for row in table.data:
             row_data = list([row.get(col.name, []) for col in table.header] if isinstance(row, dict) else row)
+
             for cell_idx, cell in enumerate(row_data):
                 if ' '.join(cell) in context and len(cell) > 0:
                     candidate_cells[cell_idx].append(cell)
                     break
 
-        for col_idx in range(len(candidate_cells)):
+        for col_idx, column in enumerate(table.header):
             if len(candidate_cells[col_idx]) == 0:
                 # use partial match
                 max_ngram_num = 3
-                found = False
+                cell_match_scores = []
                 for row_id, row in enumerate(table.data):
                     cell = row.get(table.header[col_idx].name, []) if isinstance(row, dict) else row[col_idx]
+                    found = False
                     if len(cell) > 0:
                         for ngram_num in reversed(range(1, max_ngram_num + 1)):
                             for start_idx in range(0, len(cell) - ngram_num + 1):
                                 end_idx = start_idx + ngram_num
                                 ngram = cell[start_idx: end_idx]
                                 if not StringMatchUtil.all_stop_words(ngram) and StringMatchUtil.contains(context, ngram):
-                                    candidate_cells[col_idx] = cell
+                                    cell_match_scores.append((ngram, ngram_num))
                                     found = True
 
                                 if found: break
 
                             if found: break
 
-                    if found: break
+                best_matched_cell = sorted(cell_match_scores, key=lambda x: -x[1])
+                if best_matched_cell:
+                    best_matched_cell = best_matched_cell[0][0]
+                else:
+                    best_matched_cell = column.sample_value_tokens
             else:
-                candidate_cells[col_idx] = candidate_cells[col_idx][0]
+                best_matched_cell = candidate_cells[col_idx][0]
+
+            candidate_cells[col_idx] = best_matched_cell
 
         return candidate_cells
 
