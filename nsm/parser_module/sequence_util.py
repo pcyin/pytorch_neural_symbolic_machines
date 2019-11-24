@@ -134,7 +134,7 @@ STOP_WORDS = {
 class StringMatchUtil(object):
     @staticmethod
     def all_stop_words(sequence):
-        all(w in STOP_WORDS or w in string.punctuation for w in sequence)
+        return all(w in STOP_WORDS or w in string.punctuation for w in sequence)
 
     @staticmethod
     def contains(sequence, query):

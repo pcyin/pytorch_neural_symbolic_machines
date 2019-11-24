@@ -246,7 +246,7 @@ class BertEncoder(EncoderBase):
         for row_id, row in enumerate(table.data):
             row_data = list(row.values() if isinstance(row, dict) else row)
             for cell in row_data:
-                if len(cell) > 0 and StringMatchUtil.contains(context, cell):
+                if len(cell) > 0 and StringMatchUtil.contains(context, cell) and not StringMatchUtil.all_stop_words(cell):
                 # if ' '.join(cell) in context and len(cell) > 0:
                     candidate_rows.append(row)
                     candidate_row_ids.append(row_id)
@@ -299,7 +299,7 @@ class BertEncoder(EncoderBase):
             row_data = list([row.get(col.name, []) for col in table.header] if isinstance(row, dict) else row)
 
             for cell_idx, cell in enumerate(row_data):
-                if ' '.join(cell) in context and len(cell) > 0:
+                if len(cell) > 0 and StringMatchUtil.contains(context, cell) and not StringMatchUtil.all_stop_words(cell):
                     candidate_cells[cell_idx].append(cell)
                     break
 
