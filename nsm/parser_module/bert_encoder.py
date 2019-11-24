@@ -181,10 +181,14 @@ class BertEncoder(EncoderBase):
             use_question_biased_sampled_values = self.config.get('use_question_biased_sampled_values', True)
             if isinstance(self.bert_model, VerticalAttentionTableBert):
                 if use_question_biased_sampled_values:
-                    sampled_rows = self.get_question_biased_sampled_rows(
-                        e['question_tokens'], e['table'],
-                        num_rows=self.bert_model.config.sample_row_num
-                    )
+                    if 'sampled_rows' not in e:
+                        sampled_rows = self.get_question_biased_sampled_rows(
+                            e['question_tokens'], e['table'],
+                            num_rows=self.bert_model.config.sample_row_num
+                        )
+                        e['sampled_rows'] = sampled_rows
+
+                    sampled_rows = e['sampled_rows']
                 else:
                     if self.training:
                         sampled_rows = [
@@ -205,9 +209,13 @@ class BertEncoder(EncoderBase):
             else:
                 table = e['table']
                 if use_question_biased_sampled_values:
-                    sampled_cells = self.get_question_biased_sampled_cells(
-                        e['question_tokens'], e['table']
-                    )
+                    if 'sampled_cells' not in e:
+                        sampled_cells = self.get_question_biased_sampled_cells(
+                            e['question_tokens'], e['table']
+                        )
+                        e['sampled_cells'] = sampled_cells
+
+                    sampled_cells = e['sampled_cells']
                     new_header = []
                     for idx, column in enumerate(e['table'].header):
                         new_column = Column(
@@ -215,7 +223,11 @@ class BertEncoder(EncoderBase):
                             sample_value=sampled_cells[idx], sample_value_tokens=sampled_cells[idx]
                         )
                         new_header.append(new_column)
-                    table = Table(id=table.id, header=new_header, data=[])
+
+                    table = Table(
+                        id=table.id, header=new_header,
+                        data=[{column.name: column.sample_value_tokens for column in new_header}]
+                    )
 
             tables.append(table)
 
@@ -241,20 +253,18 @@ class BertEncoder(EncoderBase):
         return table_bert_encoding
 
     def get_question_biased_sampled_rows(self, context, table, num_rows=3):
-        candidate_rows = []
-        candidate_row_ids = []
         candidate_row_match_score = {}
         for row_id, row in enumerate(table.data):
             row_data = list(row.values() if isinstance(row, dict) else row)
             for cell in row_data:
                 if len(cell) > 0 and StringMatchUtil.contains(context, cell) and not StringMatchUtil.all_stop_words(cell):
-                # if ' '.join(cell) in context and len(cell) > 0:
-                    candidate_rows.append(row)
-                    candidate_row_ids.append(row_id)
-                    candidate_row_match_score[row_id] = 5
-                    break
+                    candidate_row_match_score[row_id] = max(
+                        candidate_row_match_score.get(row_id, 0),
+                        len(cell)
+                    )
 
-        if len(candidate_rows) < num_rows:
+        candidate_row_ids = [idx for idx, score in candidate_row_match_score.items() if score > 0]
+        if len(candidate_row_ids) < num_rows:
             # find partial match
             max_ngram_num = 3
             for row_id, row in enumerate(table.data):
@@ -281,34 +291,35 @@ class BertEncoder(EncoderBase):
                             if found: break
 
             candidate_row_ids = [idx for idx, score in candidate_row_match_score.items() if score > 0]
-            top_k_row_ids_by_match_score = sorted(candidate_row_ids, key=lambda row_id: -candidate_row_match_score[row_id])[:num_rows]
-            if len(top_k_row_ids_by_match_score) < num_rows:
-                not_included_row_ids = [idx for idx in range(len(table)) if idx not in top_k_row_ids_by_match_score]
-                top_k_row_ids_by_match_score = top_k_row_ids_by_match_score + not_included_row_ids[:num_rows - len(top_k_row_ids_by_match_score)]
+            if len(candidate_row_ids) < num_rows:
+                not_included_row_ids = [idx for idx in range(len(table)) if idx not in candidate_row_ids]
+                left = num_rows - len(candidate_row_ids)
+                for idx in not_included_row_ids[:left]: candidate_row_match_score[idx] = 0
+                candidate_row_ids = candidate_row_ids + not_included_row_ids[:left]
 
-            top_k_row_ids_by_match_score = sorted(top_k_row_ids_by_match_score)
-            candidate_rows = [table.data[idx] for idx in top_k_row_ids_by_match_score]
-        else:
-            candidate_rows = candidate_rows[:num_rows]
+        top_k_row_ids_by_match_score = sorted(
+            candidate_row_ids,
+            key=lambda row_id: -candidate_row_match_score[row_id])[:num_rows]
+        top_k_row_ids_by_match_score = sorted(top_k_row_ids_by_match_score)
+        candidate_rows = [table.data[idx] for idx in top_k_row_ids_by_match_score]
 
         return candidate_rows
 
     def get_question_biased_sampled_cells(self, context, table):
         candidate_cells = [[] for column in table.header]
 
-        for row in table.data:
-            row_data = list([row.get(col.name, []) for col in table.header] if isinstance(row, dict) else row)
-
-            for cell_idx, cell in enumerate(row_data):
-                if len(cell) > 0 and StringMatchUtil.contains(context, cell) and not StringMatchUtil.all_stop_words(cell):
-                    candidate_cells[cell_idx].append(cell)
-                    break
-
         for col_idx, column in enumerate(table.header):
-            if len(candidate_cells[col_idx]) == 0:
+            cell_match_scores = []
+
+            for row in table.data:
+                cell = row.get(table.header[col_idx].name, []) if isinstance(row, dict) else row[col_idx]
+                if len(cell) > 0 and StringMatchUtil.contains(context, cell) and not StringMatchUtil.all_stop_words(cell):
+                    cell_match_scores.append((cell, len(cell)))
+
+            if len(cell_match_scores) == 0:
                 # use partial match
                 max_ngram_num = 3
-                cell_match_scores = []
+
                 for row_id, row in enumerate(table.data):
                     cell = row.get(table.header[col_idx].name, []) if isinstance(row, dict) else row[col_idx]
                     found = False
@@ -325,13 +336,11 @@ class BertEncoder(EncoderBase):
 
                             if found: break
 
-                best_matched_cell = sorted(cell_match_scores, key=lambda x: -x[1])
-                if best_matched_cell:
-                    best_matched_cell = best_matched_cell[0][0]
-                else:
-                    best_matched_cell = column.sample_value_tokens
+            best_matched_cell = sorted(cell_match_scores, key=lambda x: -x[1])
+            if best_matched_cell:
+                best_matched_cell = best_matched_cell[0][0]
             else:
-                best_matched_cell = candidate_cells[col_idx][0]
+                best_matched_cell = column.sample_value_tokens
 
             candidate_cells[col_idx] = best_matched_cell
 
