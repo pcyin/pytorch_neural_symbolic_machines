@@ -230,7 +230,8 @@ class BertEncoder(EncoderBase):
 
         table_bert_encoding = {
             'question_encoding': question_encoding,
-            'column_encoding': table_column_encoding
+            'column_encoding': table_column_encoding,
+            'input_tables': tables,
         }
 
         table_bert_encoding.update(info['tensor_dict'])
