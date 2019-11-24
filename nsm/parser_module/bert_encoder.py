@@ -317,7 +317,7 @@ class BertEncoder(EncoderBase):
                                 end_idx = start_idx + ngram_num
                                 ngram = cell[start_idx: end_idx]
                                 if not StringMatchUtil.all_stop_words(ngram) and StringMatchUtil.contains(context, ngram):
-                                    cell_match_scores.append((ngram, ngram_num))
+                                    cell_match_scores.append((cell, ngram_num))
                                     found = True
 
                                 if found: break
