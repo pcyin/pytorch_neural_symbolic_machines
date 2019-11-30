@@ -1,6 +1,7 @@
 import ctypes
 import heapq
 import json
+import math
 import os
 import random
 import time
@@ -15,6 +16,7 @@ import torch.multiprocessing as torch_mp
 import multiprocessing
 
 from pytorch_pretrained_bert import BertAdam
+from table_bert.vertical.vertical_attention_table_bert import VerticalAttentionTableBert
 
 from nsm import nn_util
 from nsm.parser_module import get_parser_agent_by_name
@@ -117,32 +119,27 @@ class Learner(torch_mp.Process):
             except NotImplementedError:
                 pass
 
-            train_trajectories = [sample.trajectory for sample in train_samples]
+            # to save memory, for vertical tableBERT, we partition the training trajectories into small chunks
+            if isinstance(self.agent.encoder.bert_model, VerticalAttentionTableBert):
+                chunk_size = 5
+            else:
+                chunk_size = len(train_samples)
 
-            # (batch_size)
-            batch_log_prob, meta_info = self.agent(train_trajectories, return_info=True)
+            chunk_num = int(math.ceil(len(train_samples) / chunk_size))
+            cum_loss = 0.
+            if chunk_num > 1:
+                for chunk_id in range(0, chunk_num):
+                    train_samples_chunk = train_samples[chunk_size * chunk_id: chunk_size * chunk_id + chunk_size]
+                    loss_val = self.train_step(train_samples_chunk, train_iter, summary_writer)
+                    cum_loss += loss_val
 
-            train_sample_weights = batch_log_prob.new_tensor([s.weight for s in train_samples])
-            batch_log_prob = batch_log_prob * train_sample_weights
-
-            loss = -batch_log_prob.mean()
-
-            if gradient_accumulation_niter > 1:
-                loss /= gradient_accumulation_niter
-
-            summary_writer.add_scalar('parser_loss', loss.item(), train_iter)
-            # loss = -batch_log_prob.sum() / max_batch_size
-
-            if entropy_reg_weight != 0.:
-                entropy = entropy.mean()
-                ent_reg_loss = - entropy_reg_weight * entropy  # maximize entropy
-                loss = loss + ent_reg_loss
-
-                summary_writer.add_scalar('entropy', entropy.item(), train_iter)
-                summary_writer.add_scalar('entropy_reg_loss', ent_reg_loss.item(), train_iter)
-
-            loss.backward()
-            loss_val = loss.item()
+                grad_multiply_factor = 1 / len(train_samples)
+                for p in self.agent.parameters():
+                    if p.grad is not None:
+                        p.grad.data.mul_(grad_multiply_factor)
+            else:
+                loss_val = self.train_step(train_samples, train_iter, summary_writer, reduction='mean')
+                cum_loss = loss_val * len(train_samples)
 
             # clip gradient
             grad_norm = torch.nn.utils.clip_grad_norm_(other_params, 5.)
@@ -157,13 +154,10 @@ class Learner(torch_mp.Process):
                     other_optimizer = torch.optim.Adam(other_params, lr=0.001)
 
             # print(f'[Learner] train_iter={train_iter} loss={loss_val}', file=sys.stderr)
-            del loss
-            if entropy_reg_weight != 0.: del entropy
 
             if 'clip_frac' in samples_info:
                 summary_writer.add_scalar('sample_clip_frac', samples_info['clip_frac'], train_iter)
 
-            cum_loss += loss_val * len(train_samples)
             cum_examples += len(train_samples)
 
             if train_iter % save_every_niter == 0:
@@ -200,6 +194,34 @@ class Learner(torch_mp.Process):
         # for i in range(self.actor_num):
         #     self.checkpoint_queue.put(STOP_SIGNAL)
         # self.eval_msg_val.value = STOP_SIGNAL.encode()
+
+    def train_step(self, train_samples, train_iter, summary_writer, reduction='sum'):
+        train_trajectories = [sample.trajectory for sample in train_samples]
+
+        # (batch_size)
+        batch_log_prob, meta_info = self.agent(train_trajectories, return_info=True)
+
+        train_sample_weights = batch_log_prob.new_tensor([s.weight for s in train_samples])
+        batch_log_prob = batch_log_prob * train_sample_weights
+
+        if reduction == 'sum':
+            loss = -batch_log_prob.sum()
+        elif reduction == 'mean':
+            loss = -batch_log_prob.mean()
+        else:
+            raise ValueError(f'Unknown reduction {reduction}')
+
+        gradient_accumulation_niter = self.config.get('gradient_accumulation_niter', 1)
+        if gradient_accumulation_niter > 1:
+            loss /= gradient_accumulation_niter
+
+        summary_writer.add_scalar('parser_loss', loss.item(), train_iter)
+        # loss = -batch_log_prob.sum() / max_batch_size
+
+        loss.backward()
+        loss_val = loss.item()
+
+        return loss_val
 
     def update_model_to_actors(self, train_iter):
         t1 = time.time()
