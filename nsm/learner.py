@@ -120,7 +120,7 @@ class Learner(torch_mp.Process):
                 pass
 
             # to save memory, for vertical tableBERT, we partition the training trajectories into small chunks
-            if isinstance(self.agent.encoder.bert_model, VerticalAttentionTableBert):
+            if isinstance(self.agent.encoder.bert_model, VerticalAttentionTableBert) and 'large' in self.agent.encoder.bert_model.config.base_model_name:
                 chunk_size = 5
             else:
                 chunk_size = len(train_samples)
