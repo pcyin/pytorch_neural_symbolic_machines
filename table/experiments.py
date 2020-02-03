@@ -456,6 +456,11 @@ def distributed_train(args):
 
     json.dump(config, open(os.path.join(work_dir, 'config.json'), 'w'), indent=2)
 
+    actor_use_table_bert_proxy = config.get('actor_use_table_bert_proxy', False)
+    if actor_use_table_bert_proxy:
+        from nsm.parser_module.table_bert_proxy import TableBertServer
+        table_bert_server = TableBertServer.build(config)
+
     actor_devices = []
     if use_cuda:
         print(f'use cuda', file=sys.stderr)
@@ -463,8 +468,14 @@ def distributed_train(args):
         assert device_count >= 2
         learner_device = 'cuda:0'  # torch.device('cuda', 0)
         evaluator_device = 'cuda:1'  # torch.device('cuda', 1)
-        for i in range(1 if device_count == 2 else 2, device_count):
-            actor_devices.append(f'cuda:{i}')  # torch.device('cuda', i)
+
+        for i in range(2, device_count):
+            actor_devices.append(f'cuda:{i}')
+        else:
+            actor_devices.append('cpu')
+
+        if actor_use_table_bert_proxy:
+            table_bert_server.table_bert.to(evaluator_device)
     else:
         learner_device = evaluator_device = torch.device('cpu')
         actor_devices.append(torch.device('cpu'))
@@ -516,6 +527,15 @@ def distributed_train(args):
         learner.register_actor(actor)
 
         actors.append(actor)
+
+    if actor_use_table_bert_proxy:
+        for actor in actors:
+            table_bert_server.register_worker(actor)
+
+        learner.register_table_bert_server(table_bert_server)
+
+        print(f'starting table bert server @ {table_bert_server.device}', file=sys.stderr)
+        table_bert_server.start()
 
     # actors[0].run()
     print('starting %d actors' % actor_num, file=sys.stderr)

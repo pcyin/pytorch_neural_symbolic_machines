@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import torch.multiprocessing as torch_mp
+import multiprocessing
 
 from nsm import nn_util
 from nsm.parser_module import get_parser_agent_by_name
@@ -28,7 +29,7 @@ class Actor(torch_mp.Process):
         # self.replay_queue = replay_queue
 
         self.config = config
-        self.actor_id = actor_id
+        self.actor_id = f'Actor_{actor_id}'
         self.example_ids = example_ids
         self.device = device
 
@@ -40,6 +41,9 @@ class Actor(torch_mp.Process):
         self.train_queue = None
         self.shared_program_cache = shared_program_cache
         self.consistency_model = None
+
+        if config.get('actor_use_table_bert_proxy', False):
+            self.table_bert_result_queue = multiprocessing.Queue()
 
     @property
     def use_consistency_model(self):
@@ -71,7 +75,11 @@ class Actor(torch_mp.Process):
             torch.cuda.set_device(self.device)
 
         agent_name = self.config.get('parser', 'vanilla')
-        self.agent = get_parser_agent_by_name(agent_name).build(self.config).to(self.device).eval()
+        self.agent = get_parser_agent_by_name(agent_name).build(self.config, master=self.actor_id).to(self.device).eval()
+
+        if self.config.get('actor_use_table_bert_proxy', False):
+            # initialize proxy
+            self.agent.encoder.bert_model.initialize(self)
 
         # load environments
         self.load_environments(
@@ -413,11 +421,11 @@ class Actor(torch_mp.Process):
             t1 = time.time()
 
             state_dict = torch.load(new_model_path, map_location=lambda storage, loc: storage)
-            self.agent.load_state_dict(state_dict)
+            self.agent.load_state_dict(state_dict, strict=False)
             self.model_path = new_model_path
 
             t2 = time.time()
-            print('[Actor %d] loaded new model [%s] (took %.2f s)' % (self.actor_id, new_model_path, t2 - t1), file=sys.stderr)
+            print('[Actor %s] loaded new model [%s] (took %.2f s)' % (self.actor_id, new_model_path, t2 - t1), file=sys.stderr)
 
             return True
         else:

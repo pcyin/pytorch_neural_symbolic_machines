@@ -56,7 +56,7 @@ class Learner(torch_mp.Process):
         nn_util.init_random_seed(self.config['seed'], self.device)
 
         agent_name = self.config.get('parser', 'vanilla')
-        self.agent = get_parser_agent_by_name(agent_name).build(self.config).to(self.device).train()
+        self.agent = get_parser_agent_by_name(agent_name).build(self.config, master='learner').to(self.device).train()
 
         self.train()
 
@@ -166,13 +166,13 @@ class Learner(torch_mp.Process):
             cum_loss += loss_val * len(train_samples)
             cum_examples += len(train_samples)
 
+            self.update_model_to_actors(train_iter)
+
             if train_iter % save_every_niter == 0:
                 print(f'[Learner] train_iter={train_iter} avg. loss={cum_loss / cum_examples}, '
                       f'{cum_examples} examples ({cum_examples / (time.time() - t1)} examples/s)', file=sys.stderr)
                 cum_loss = cum_examples = 0.
                 t1 = time.time()
-
-                self.update_model_to_actors(train_iter)
 
                 # log stats of the program cache
                 program_cache_stat = self.shared_program_cache.stat()
@@ -186,8 +186,6 @@ class Learner(torch_mp.Process):
                     program_cache_stat['num_entries'],
                     train_iter
                 )
-            else:
-                self.push_new_model(self.current_model_path)
 
             if save_program_cache_niter > 0 and train_iter % save_program_cache_niter == 0:
                 program_cache_file = work_dir / 'log' / f'program_cache.iter{train_iter}.json'
@@ -200,6 +198,13 @@ class Learner(torch_mp.Process):
         # for i in range(self.actor_num):
         #     self.checkpoint_queue.put(STOP_SIGNAL)
         # self.eval_msg_val.value = STOP_SIGNAL.encode()
+
+    def try_update_model_to_actors(self, train_iter):
+        save_every_niter = self.config.get('save_every_niter')
+        if train_iter % save_every_niter == 0:
+            self.update_model_to_actors(train_iter)
+        else:
+            self.push_new_model(self.current_model_path)
 
     def update_model_to_actors(self, train_iter):
         t1 = time.time()
@@ -219,6 +224,10 @@ class Learner(torch_mp.Process):
         if model_path:
             self.eval_msg_val.value = model_path.encode()
 
+            table_bert_server_msg_val = getattr(self, 'table_bert_server_msg_val', None)
+            if table_bert_server_msg_val:
+                table_bert_server_msg_val.value = model_path.encode()
+
     def register_actor(self, actor):
         actor.checkpoint_queue = self.checkpoint_queue
         actor.train_queue = self.train_queue
@@ -228,3 +237,8 @@ class Learner(torch_mp.Process):
         msg_var = multiprocessing.Array(ctypes.c_char, 4096)
         self.eval_msg_val = msg_var
         evaluator.message_var = msg_var
+
+    def register_table_bert_server(self, table_bert_server):
+        msg_val = multiprocessing.Array(ctypes.c_char, 4096)
+        self.table_bert_server_msg_val = msg_val
+        table_bert_server.learner_msg_val = msg_val

@@ -87,7 +87,7 @@ class BertDecoder(DecoderBase):
         return next(self.parameters()).device
 
     @classmethod
-    def build(cls, config, encoder: BertEncoder) -> 'BertDecoder':
+    def build(cls, config, encoder: BertEncoder, master: str = None) -> 'BertDecoder':
         return cls(
             mem_item_embed_size=config['value_embedding_size'],
             constant_value_embed_size=config['value_embedding_size'],

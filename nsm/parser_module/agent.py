@@ -521,7 +521,7 @@ class PGAgent(nn.Module):
         return sampled_actions.squeeze(-1)
 
     @classmethod
-    def build(cls, config, params=None):
+    def build(cls, config, params=None, master=None):
         dummy_kg = {
             'kg': None,
             'num_props': [],
@@ -539,8 +539,8 @@ class PGAgent(nn.Module):
         )
         config['builtin_func_num'] = op_vocab.size
 
-        encoder = BertEncoder.build(config)
-        decoder = BertDecoder.build(config, encoder)
+        encoder = BertEncoder.build(config, master=master)
+        decoder = BertDecoder.build(config, encoder, master=master)
 
         sketch_predictor = None
         if config.get('use_trainable_sketch_manager', False):

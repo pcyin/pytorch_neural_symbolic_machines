@@ -76,7 +76,7 @@ class Evaluator(torch_mp.Process):
         nn_util.init_random_seed(self.config['seed'], self.device)
 
         agent_name = self.config.get('parser', 'vanilla')
-        self.agent = get_parser_agent_by_name(agent_name).build(self.config).to(self.device).eval()
+        self.agent = get_parser_agent_by_name(agent_name).build(self.config, master='evaluator').to(self.device).eval()
 
         self.load_environments()
         summary_writer = SummaryWriter(os.path.join(self.config['work_dir'], 'tb_log/dev'))

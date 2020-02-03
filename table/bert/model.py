@@ -72,7 +72,7 @@ class TableBertConfig(SimpleNamespace):
         base_model_name: str = 'bert-base-uncased',
         column_delimiter: str = '[SEP]',
         context_first: bool = True,
-        cell_input_template: bool = 'column|value|cell',
+        cell_input_template: bool = 'column|type|value',
         column_representation: str = 'mean_pool',
         max_cell_value_token_num: int = 5
     ):
@@ -108,10 +108,10 @@ class TableBertConfig(SimpleNamespace):
             use_value = args.get('use_sample_value', True)
             use_type = args.get('use_type_text', True)
 
-            if use_value:
-                cell_input_template += column_item_delimiter + 'value'
             if use_type:
                 cell_input_template += column_item_delimiter + 'type'
+            if use_value:
+                cell_input_template += column_item_delimiter + 'value'
 
             config_dict['cell_input_template'] = cell_input_template
 
@@ -249,7 +249,7 @@ class TableBERT(nn.Module):
                 input.extend(cell_value)
             elif token == 'type':
                 span_map['type'] = (start_token_abs_position,
-                                    start_token_abs_position + len(cell_value))
+                                    start_token_abs_position + 1)
                 input.append(column.type)
             else:
                 input.append(token)
