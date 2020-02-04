@@ -33,6 +33,7 @@ class TableBertProxy(nn.Module):
     def initialize(self, actor: Actor):
         self.request_queue = actor.table_bert_request_queue
         self.result_queue = actor.table_bert_result_queue
+        self.actor = actor
 
     @property
     def output_size(self):
@@ -53,6 +54,7 @@ class TableBertProxy(nn.Module):
         payload = (contexts, tables)
         request = {
             'worker_id': self.worker_id,
+            'model_ver': self.actor.model_path,
             'payload': payload
         }
         self.request_queue.put(request)
@@ -86,24 +88,16 @@ class TableBertProxy(nn.Module):
 
 
 class TableBertServer(multiprocessing.Process):
-    def __init__(self, config: Any, table_bert_model):
+    def __init__(self, config: Any, device: torch.device = 'cpu'):
         super(TableBertServer, self).__init__()
 
-        self.table_bert = table_bert_model
         self.request_queue = multiprocessing.Queue()
         self.workers = dict()
+        self.config = config
+        self.target_device = device
 
         self.model_path: Optional[str] = None
         self.learner_msg_val: multiprocessing.Value = None
-
-    @classmethod
-    def build(cls, config):
-        table_bert_model = get_table_bert_model(
-            config, use_proxy=False, master='table_bert_server').eval()
-
-        server = cls(config, table_bert_model)
-
-        return server
 
     @property
     def device(self):
@@ -120,20 +114,47 @@ class TableBertServer(multiprocessing.Process):
         )
         setattr(actor, 'table_bert_request_queue', self.request_queue)
 
+    def init_server(self):
+        target_device = self.target_device
+        if 'cuda' in str(target_device):
+            torch.cuda.set_device(target_device)
+
+        self.table_bert = get_table_bert_model(
+            self.config, use_proxy=False,
+            master='table_bert_server'
+        ).to(target_device).eval()
+
     def run(self):
-        while True:
-            request = self.request_queue.get()
-            payload = request['payload']
-            worker_id = request['worker_id']
+        print('[TableBertServer] Init table bert...', file=sys.stderr)
+        self.init_server()
+        print('[TableBertServer] Init success', file=sys.stderr)
 
-            with torch.no_grad():
+        cum_request_num = 0.
+        cum_model_ver_not_match_num = 0.
+        with torch.no_grad():
+            while True:
+                request = self.request_queue.get()
+
+                cum_request_num += 1.
+
+                payload = request['payload']
+                worker_id = request['worker_id']
+
+                worker_model_ver = request['model_ver']
+                self_model_ver = self.model_path
+
+                if worker_model_ver != self_model_ver:
+                    cum_model_ver_not_match_num += 1
+                    print(f'[TableBertServer] Server model version does not match with source, '
+                          f'ratio={cum_model_ver_not_match_num / cum_request_num}',
+                          file=sys.stderr)
+
                 encode_result = self.table_bert.encode(*payload)
+                packed_result = self.pack_encode_result(encode_result)
 
-            packed_result = self.pack_encode_result(encode_result)
+                self.workers[worker_id].result_queue.put(packed_result)
 
-            self.workers[worker_id].result_queue.put(packed_result)
-
-            self.check_and_load_new_model()
+                self.check_and_load_new_model()
 
     def pack_encode_result(self, encode_result: Any) -> Any:
         def _to_numpy_array(obj):
@@ -173,6 +194,7 @@ class TableBertServer(multiprocessing.Process):
 
             self.table_bert.load_state_dict(state_dict)
             self.model_path = new_model_path
+            self.table_bert.eval()
 
             t2 = time.time()
             print('[TableBertServer] loaded new model [%s] (took %.2f s)' % (new_model_path, t2 - t1), file=sys.stderr)

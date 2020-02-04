@@ -166,7 +166,7 @@ class Learner(torch_mp.Process):
             cum_loss += loss_val * len(train_samples)
             cum_examples += len(train_samples)
 
-            self.update_model_to_actors(train_iter)
+            self.try_update_model_to_actors(train_iter)
 
             if train_iter % save_every_niter == 0:
                 print(f'[Learner] train_iter={train_iter} avg. loss={cum_loss / cum_examples}, '
