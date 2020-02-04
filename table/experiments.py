@@ -465,6 +465,7 @@ def distributed_train(args):
         device_count = torch.cuda.device_count()
         assert device_count >= 2
         learner_device = 'cuda:0'  # torch.device('cuda', 0)
+        evaluator_device = learner_device
         # evaluator_device = 'cuda:1'  # torch.device('cuda', 1)
         table_bert_server_device = 'cuda:1'
 

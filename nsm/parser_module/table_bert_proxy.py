@@ -131,6 +131,7 @@ class TableBertServer(multiprocessing.Process):
 
         cum_request_num = 0.
         cum_model_ver_not_match_num = 0.
+        cum_process_time = 0.
         with torch.no_grad():
             while True:
                 request = self.request_queue.get()
@@ -143,16 +144,29 @@ class TableBertServer(multiprocessing.Process):
                 worker_model_ver = request['model_ver']
                 self_model_ver = self.model_path
 
-                if worker_model_ver != self_model_ver:
-                    cum_model_ver_not_match_num += 1
-                    print(f'[TableBertServer] Server model version does not match with source, '
-                          f'ratio={cum_model_ver_not_match_num / cum_request_num}',
-                          file=sys.stderr)
+                # if worker_model_ver != self_model_ver:
+                #     self.check_and_load_new_model()
 
+                self_model_ver = self.model_path
+                if worker_model_ver != self_model_ver:
+                    cum_model_ver_not_match_num += 1.
+                    if cum_model_ver_not_match_num % 100 == 0:
+                        print(f'[TableBertServer] Server model version does not match '
+                              f'with source {self_model_ver}!={worker_model_ver}, '
+                              f'ratio={cum_model_ver_not_match_num / cum_request_num}',
+                              file=sys.stderr)
+
+                t1 = time.time()
                 encode_result = self.table_bert.encode(*payload)
                 packed_result = self.pack_encode_result(encode_result)
+                t2 = time.time()
 
                 self.workers[worker_id].result_queue.put(packed_result)
+
+                cum_process_time += t2 - t1
+                if cum_request_num % 100 == 0:
+                    print(f'cum. request={cum_request_num}, speed={cum_request_num / cum_process_time} requests/s',
+                          file=sys.stderr)
 
                 self.check_and_load_new_model()
 
