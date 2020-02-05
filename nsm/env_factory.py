@@ -328,7 +328,9 @@ class QAProgrammingEnv(Environment):
                         self.id_feature_dict[id] = prop_features[val]
 
         self.context['id_feature_dict'] = self.id_feature_dict
-        self.context['original_tokens'] = question_annotation['original_tokens']
+
+        if 'original_tokens' in self.context:
+            self.context['original_tokens'] = question_annotation['original_tokens']
 
         if cache:
             self.cache = cache

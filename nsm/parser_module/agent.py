@@ -298,6 +298,15 @@ class PGAgent(nn.Module):
         state_tm1 = self.decoder.get_initial_state(context_encoding)
         hyp_scores_tm1 = torch.zeros(batch_size, device=self.device)
 
+        # collect input tables for each example
+        env_logging_info = {
+            env.name: {
+                'input_table': context_encoding['table_bert_encoding']['input_tables'][env_idx]
+            }
+            for env_idx, env
+            in enumerate(environments)
+        }
+
         while beams:
             batched_ob_tm1 = Observation.to_batched_input(observations_tm1, memory_size=self.memory_size).to(
                 self.device)
@@ -452,14 +461,25 @@ class PGAgent(nn.Module):
             # rank completed hypothesis
             for env_name in completed_hyps.keys():
                 sorted_hyps = sorted(completed_hyps[env_name], key=lambda hyp: hyp.score, reverse=True)[:beam_size]
-                completed_hyps[env_name] = [Sample(trajectory=Trajectory.from_environment(hyp.env), prob=hyp.score) for
-                                            hyp in sorted_hyps]
+                completed_hyps[env_name] = [
+                    Sample(
+                        trajectory=Trajectory.from_environment(hyp.env),
+                        prob=hyp.score,
+                        logging_info=env_logging_info[env_name]
+                    ) for hyp in sorted_hyps
+                ]
 
             return completed_hyps
         else:
             samples_list = []
-            for _hyps in completed_hyps.values():
-                samples = [Sample(trajectory=Trajectory.from_environment(hyp.env), prob=hyp.score) for hyp in _hyps]
+            for env_name, _hyps in completed_hyps.items():
+                samples = [
+                    Sample(
+                        trajectory=Trajectory.from_environment(hyp.env),
+                        prob=hyp.score,
+                        logging_info=env_logging_info[env_name]
+                    ) for hyp in _hyps
+                ]
                 samples_list.extend(samples)
 
             return samples_list

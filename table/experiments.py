@@ -47,13 +47,10 @@ from docopt import docopt
 
 from nsm.program_cache import SharedProgramCache
 # from table.bert.data_model import Column
-from table_bert.dataset import Column
+from table_bert.dataset import Column, Table
 
 
 def annotate_example_for_bert(example: Dict, table: Dict, bert_tokenizer: BertTokenizer, args: Dict):
-    from table.bert.data_model import Table
-    from table.bert.data_model import Column
-
     e_id = example['id']
 
     # sub-tokenize the question
@@ -626,9 +623,17 @@ def to_decode_results_dict(decode_results, test_envs):
     results = OrderedDict()
 
     for env, hyp_list in zip(test_envs, decode_results):
+
+        if hyp_list:
+            table = hyp_list[0].logging_info['input_table']
+            table = table.data
+        else:
+            table = None
+
         env_result = {
             'name': env.name,
             'question': ' '.join(str(x) for x in env.context['original_tokens']),
+            'table': table,
             'hypotheses': None
         }
 
