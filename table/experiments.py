@@ -24,18 +24,19 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import List, Dict, Iterable
-import ctypes
 import numpy as np
 import torch
 from pytorch_pretrained_bert import BertTokenizer
 
+import nsm.execution.worlds.wikisql
+import nsm.execution.worlds.wikitablequestions
 from nsm.actor import Actor
 from nsm.parser_module.agent import PGAgent
 from nsm.embedding import EmbeddingModel
 from nsm.env_factory import QAProgrammingEnv
 from nsm.computer_factory import LispInterpreter
 from nsm.data_utils import Vocab
-import nsm.executor_factory as executor_factory
+import nsm.execution.executor_factory as executor_factory
 import table.utils as utils
 from nsm.data_utils import load_jsonl
 from nsm.evaluator import Evaluator, Evaluation
@@ -276,11 +277,11 @@ def create_environments(table_dict, dataset, en_vocab, embedding_model, executor
     if executor_type == 'wtq':
         score_fn = utils.wtq_score
         process_answer_fn = lambda x: x
-        executor_fn = executor_factory.WikiTableExecutor
+        executor_fn = nsm.execution.worlds.wikitablequestions.WikiTableExecutor
     elif executor_type == 'wikisql':
         score_fn = utils.wikisql_score
         process_answer_fn = utils.wikisql_process_answer
-        executor_fn = executor_factory.WikiSQLExecutor
+        executor_fn = nsm.execution.worlds.wikisql.WikiSQLExecutor
     else:
         raise ValueError('Unknown executor {}'.format(executor_type))
 
@@ -363,33 +364,6 @@ def to_human_readable_program(program, env):
     return readable_program
 
 
-def init_interpreter_for_example(example_dict, table_dict):
-    executor = executor_factory.WikiTableExecutor(table_dict)
-    api = executor.get_api()
-
-    interpreter = LispInterpreter(type_hierarchy=api['type_hierarchy'],
-                                  max_mem=60,
-                                  max_n_exp=50,
-                                  assisted=True)
-
-    for func in api['func_dict'].values():
-        interpreter.add_function(**func)
-
-    interpreter.add_constant(value=table_dict['row_ents'],
-                             type='entity_list',
-                             name='all_rows')
-
-    for constant in api['constant_dict'].values():
-        interpreter.add_constant(type=constant['type'],
-                                 value=constant['value'])
-
-    for entity in example_dict['entities']:
-        interpreter.add_constant(value=entity['value'],
-                                 type=entity['type'])
-
-    return interpreter
-
-
 def run_sample():
     envs = load_environments(["/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/data_split_1/train_split_shard_90-0.jsonl"],
                              "/Users/yinpengcheng/Research/SemanticParsing/nsm/data/wikitable_reproduce/processed_input/wtq_preprocess/tables.jsonl",
@@ -454,6 +428,7 @@ def distributed_train(args):
     json.dump(config, open(os.path.join(work_dir, 'config.json'), 'w'), indent=2)
 
     actor_use_table_bert_proxy = config.get('actor_use_table_bert_proxy', False)
+    use_trainable_sketch_predictor = config.get('use_trainable_sketch_predictor', False)
 
     actor_devices = []
     evaluator_device = 'cpu'
@@ -465,6 +440,7 @@ def distributed_train(args):
         evaluator_device = learner_device
         # evaluator_device = 'cuda:1'  # torch.device('cuda', 1)
         table_bert_server_device = 'cuda:1'
+        sketch_predictor_device = 'cuda:1'
 
         for i in range(2, device_count):
             actor_devices.append(f'cuda:{i}')
@@ -474,6 +450,7 @@ def distributed_train(args):
         learner_device = evaluator_device = torch.device('cpu')
         actor_devices.append(torch.device('cpu'))
         table_bert_server_device = torch.device('cpu')
+        sketch_predictor_device = torch.device('cpu')
 
     shared_program_cache = SharedProgramCache()
 
@@ -534,6 +511,17 @@ def distributed_train(args):
 
         print(f'starting table bert server @ {table_bert_server_device}', file=sys.stderr)
         table_bert_server.start()
+
+    if use_trainable_sketch_predictor:
+        from nsm.sketch.sketch_predictor import SketchPredictorServer
+
+        sketch_predictor_server = SketchPredictorServer(config, sketch_predictor_device)
+        for actor in actors:
+            sketch_predictor_server.register_worker(actor)
+
+        learner.register_sketch_predictor_server(sketch_predictor_server)
+        print(f'starting sketch predictor server @ {sketch_predictor_device}', file=sys.stderr)
+        sketch_predictor_server.start()
 
     # actors[0].run()
     print('starting %d actors' % actor_num, file=sys.stderr)

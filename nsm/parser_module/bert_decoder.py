@@ -124,6 +124,22 @@ class BertDecoder(DecoderBase):
         return state
 
     def get_initial_memory(self, context_encoding: ContextEncoding):
+        """
+        Layout of memory
+        [
+            /* Predefined functions and tokens */
+            hop,
+            filter_eq,
+            ...,
+            diff,
+            all_rows
+            /* Constant Encodings */
+            Table Columns,
+            ....,
+            Entities from Spans
+        ]
+        """
+
         constant_encoding = context_encoding['constant_encoding']
 
         # add built-in functional operator embeddings

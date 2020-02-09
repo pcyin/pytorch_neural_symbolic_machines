@@ -19,7 +19,7 @@ from table_bert.vanilla_table_bert import VanillaTableBert
 from table_bert.table import Column, Table
 # from table.bert.data_model import Example
 # from table.bert.model import TableBERT
-from nsm.parser_module.table_bert_helper import get_table_bert_model
+from nsm.parser_module.table_bert_helper import get_table_bert_model, get_table_bert_input_from_context
 
 Example = namedtuple('Example', ['question', 'table'])
 
@@ -146,73 +146,15 @@ class BertEncoder(EncoderBase):
 
         return batch_dict
 
-    def _bert_encode(self, env_context: List[Dict]) -> Any:
-        contexts = []
-        tables = []
-        for e in env_context:
-            contexts.append(e['question_tokens'])
-
-            use_question_biased_sampled_values = self.config.get('use_question_biased_sampled_values', True)
-            if isinstance(self.bert_model.config, VerticalAttentionTableBertConfig):
-                if use_question_biased_sampled_values:
-                    if 'sampled_rows' not in e:
-                        sampled_rows = self.get_question_biased_sampled_rows(
-                            e['question_tokens'], e['table'],
-                            num_rows=self.bert_model.config.sample_row_num
-                        )
-                        e['sampled_rows'] = sampled_rows
-
-                    sampled_rows = e['sampled_rows']
-                else:
-                    if self.training:
-                        sampled_rows = [
-                            e['table'].data[idx]
-                            for idx
-                            in sorted(
-                                np.random.choice(
-                                    list(range(len(e['table']))),
-                                    replace=False,
-                                    size=self.bert_model.config.sample_row_num
-                                )
-                            )
-                        ]
-                    else:
-                        sampled_rows = e['table'].data[:self.bert_model.config.sample_row_num]
-
-                table = e['table'].with_rows(sampled_rows)
-            else:
-                table = e['table']
-                if use_question_biased_sampled_values:
-                    if 'sampled_cells' not in e:
-                        sampled_cells = self.get_question_biased_sampled_cells(
-                            e['question_tokens'], e['table']
-                        )
-                        e['sampled_cells'] = sampled_cells
-
-                    sampled_cells = e['sampled_cells']
-                    new_header = []
-                    for idx, column in enumerate(e['table'].header):
-                        new_column = Column(
-                            name=column.name, name_tokens=column.name_tokens, type=column.type,
-                            sample_value=sampled_cells[idx], sample_value_tokens=sampled_cells[idx]
-                        )
-                        new_header.append(new_column)
-
-                    table = Table(
-                        id=table.id, header=new_header,
-                        data=[{column.name: column.sample_value_tokens for column in new_header}]
-                    )
-
-            tables.append(table)
+    def bert_encode(self, env_context: List[Dict]) -> Any:
+        contexts, tables = get_table_bert_input_from_context(
+            env_context, self.bert_model, is_training=self.training,
+            use_question_biased_sampled_values=self.config.get('use_question_biased_sampled_values', False)
+        )
 
         question_encoding, table_column_encoding, info = self.bert_model.encode(
             contexts, tables
         )
-
-        # table_bert_encoding = {
-        #     'question_encoding': question_encoding['value'],
-        #     'column_encoding': table_column_encoding['value'],
-        # }
 
         table_bert_encoding = {
             'question_encoding': question_encoding,
@@ -221,117 +163,19 @@ class BertEncoder(EncoderBase):
         }
 
         table_bert_encoding.update(info['tensor_dict'])
-        # table_bert_encoding['context_token_mask'] = question_encoding['mask']
-        # table_bert_encoding['column_mask'] = table_column_encoding['mask']
 
         return table_bert_encoding
 
-    def get_question_biased_sampled_rows(self, context, table, num_rows=3):
-        candidate_row_match_score = {}
-        for row_id, row in enumerate(table.data):
-            row_data = list(row.values() if isinstance(row, dict) else row)
-            for cell in row_data:
-                if len(cell) > 0 and StringMatchUtil.contains(context, cell) and not StringMatchUtil.all_stop_words(cell):
-                    candidate_row_match_score[row_id] = max(
-                        candidate_row_match_score.get(row_id, 0),
-                        len(cell)
-                    )
-
-        candidate_row_ids = [idx for idx, score in candidate_row_match_score.items() if score > 0]
-        if len(candidate_row_ids) < num_rows:
-            # find partial match
-            max_ngram_num = 3
-            for row_id, row in enumerate(table.data):
-                if row_id in candidate_row_ids:
-                    continue
-
-                row_data = list(row.values() if isinstance(row, dict) else row)
-
-                for cell in row_data:
-                    found = False
-                    if len(cell) > 0:
-                        for ngram_num in reversed(range(1, max_ngram_num + 1)):
-                            for start_idx in range(0, len(cell) - ngram_num + 1):
-                                end_idx = start_idx + ngram_num
-                                ngram = cell[start_idx: end_idx]
-                                if not StringMatchUtil.all_stop_words(ngram) and StringMatchUtil.contains(context, ngram):
-                                    candidate_row_match_score[row_id] = max(
-                                        ngram_num,
-                                        candidate_row_match_score.get(row_id, 0)
-                                    )
-                                    found = True
-
-                                if found: break
-                            if found: break
-
-            candidate_row_ids = [idx for idx, score in candidate_row_match_score.items() if score > 0]
-            if len(candidate_row_ids) < num_rows:
-                not_included_row_ids = [idx for idx in range(len(table)) if idx not in candidate_row_ids]
-                left = num_rows - len(candidate_row_ids)
-                for idx in not_included_row_ids[:left]: candidate_row_match_score[idx] = 0
-                candidate_row_ids = candidate_row_ids + not_included_row_ids[:left]
-
-        top_k_row_ids_by_match_score = sorted(
-            candidate_row_ids,
-            key=lambda row_id: -candidate_row_match_score[row_id])[:num_rows]
-        top_k_row_ids_by_match_score = sorted(top_k_row_ids_by_match_score)
-        candidate_rows = [table.data[idx] for idx in top_k_row_ids_by_match_score]
-
-        return candidate_rows
-
-    def get_question_biased_sampled_cells(self, context, table):
-        candidate_cells = [[] for column in table.header]
-
-        for col_idx, column in enumerate(table.header):
-            cell_match_scores = []
-
-            for row in table.data:
-                cell = row.get(table.header[col_idx].name, []) if isinstance(row, dict) else row[col_idx]
-                if len(cell) > 0 and StringMatchUtil.contains(context, cell) and not StringMatchUtil.all_stop_words(cell):
-                    cell_match_scores.append((cell, len(cell)))
-
-            if len(cell_match_scores) == 0:
-                # use partial match
-                max_ngram_num = 3
-
-                for row_id, row in enumerate(table.data):
-                    cell = row.get(table.header[col_idx].name, []) if isinstance(row, dict) else row[col_idx]
-                    found = False
-                    if len(cell) > 0:
-                        for ngram_num in reversed(range(1, max_ngram_num + 1)):
-                            for start_idx in range(0, len(cell) - ngram_num + 1):
-                                end_idx = start_idx + ngram_num
-                                ngram = cell[start_idx: end_idx]
-                                if not StringMatchUtil.all_stop_words(ngram) and StringMatchUtil.contains(context, ngram):
-                                    cell_match_scores.append((cell, ngram_num))
-                                    found = True
-
-                                if found: break
-
-                            if found: break
-
-            best_matched_cell = sorted(cell_match_scores, key=lambda x: -x[1])
-            if best_matched_cell:
-                best_matched_cell = best_matched_cell[0][0]
-            else:
-                best_matched_cell = column.sample_value_tokens
-
-            candidate_cells[col_idx] = best_matched_cell
-
-        return candidate_cells
-
     def encode(self, env_context: List[Dict]) -> ContextEncoding:
-        batched_context = self.example_list_to_batch(env_context)
+        batch_size = len(env_context)
 
-        table_bert_encoding = self._bert_encode(env_context)
+        batched_context = self.example_list_to_batch(env_context)
+        table_bert_encoding = self.bert_encode(env_context)
 
         # remove leading [CLS] symbol
         question_encoding = table_bert_encoding['question_encoding'][:, 1:]
         question_mask = table_bert_encoding['context_token_mask'][:, 1:]
         cls_encoding = table_bert_encoding['question_encoding'][:, 0]
-
-        canonical_column_encoding = table_column_encoding = table_bert_encoding['column_encoding']
-        canonical_column_mask = table_column_mask = table_bert_encoding['column_mask']
 
         if self.question_feat_size > 0:
             question_encoding = torch.cat([
@@ -340,32 +184,58 @@ class BertEncoder(EncoderBase):
                 dim=-1)
 
         question_encoding = self.bert_output_project(question_encoding)
-
         question_encoding_att_linear = self.question_encoding_att_value_to_key(question_encoding)
 
-        batch_size = len(env_context)
+        context_encoding = {
+            'batch_size': batch_size,
+            'question_encoding': question_encoding,
+            'question_mask': question_mask,
+            'question_encoding_att_linear': question_encoding_att_linear,
+        }
+
+        canonical_column_encoding = table_column_encoding = table_bert_encoding['column_encoding']
+        canonical_column_mask = table_column_mask = table_bert_encoding['column_mask']
         max_column_num = table_column_encoding.size(1)
+        # this is the maximum number of constants (Rows, Constants)
         constant_value_num = batched_context['constant_spans'].size(1)
 
         if self.config['table_representation'] == 'canonical':
+            # The preprocessed table could have multiple columns corresponding
+            # to the same original column.
+            # A canonical table like:
+            # Canonical Form: | Mongolian: string | area_km:string | sum:string | density_km-string | population_2009-string |
+            # Could have the following representation after pre-processing
+            # Raw Form: | Mongolian: string | area_km:string | area_km:number | sum:string | sum:number | density_km-string | density_km-number | ...
+            # By default, table bert encodes the canonical form of the table
+
             new_tensor = table_column_encoding.new_tensor
             canonical_column_encoding = table_column_encoding
 
+            # (batch_size, constant_value_num)
+            # map from the raw column id to its canonical column id
+            # the number of raw columns is larger than the number of canonical columns
+            # this information is stored in `Table.column_info['raw_column_canonical_ids']`
             raw_column_canonical_ids = np.zeros((batch_size, constant_value_num), dtype=np.int64)
-            column_type_ids = np.zeros((batch_size, constant_value_num), dtype=np.int64)
             raw_column_mask = np.zeros((batch_size, constant_value_num), dtype=np.float32)
+            raw_column_type_ids = np.zeros((batch_size, constant_value_num), dtype=np.int64)
 
             for e_id, context in enumerate(env_context):
                 column_info = context['table'].column_info
                 raw_columns = column_info['raw_columns']
                 valid_column_num = min(constant_value_num, len(raw_columns))
                 raw_column_canonical_ids[e_id, :valid_column_num] = column_info['raw_column_canonical_ids'][:valid_column_num]
-                column_type_ids[e_id, :valid_column_num] = [
-                    self.column_type_to_id[col.type] for col in raw_columns][:valid_column_num]
+
+                raw_column_type_ids[e_id, :valid_column_num] = [
+                    self.column_type_to_id[col.type]
+                    for col
+                    in raw_columns
+                ][:valid_column_num]
 
                 raw_column_mask[e_id, :valid_column_num] = 1.
 
             raw_column_canonical_ids = new_tensor(raw_column_canonical_ids, dtype=torch.long)
+
+            # `table_column_encoding` stores raw columns used in NSM
             table_column_encoding = torch.gather(
                 canonical_column_encoding,
                 dim=1,
@@ -373,9 +243,13 @@ class BertEncoder(EncoderBase):
             )
 
             if self.config['use_column_type_embedding']:
-                type_fused_column_encoding = torch.cat([
-                    table_column_encoding, self.column_type_embedding(new_tensor(column_type_ids, dtype=torch.long))
-                ], dim=-1)
+                type_fused_column_encoding = torch.cat(
+                    [
+                        table_column_encoding,
+                        self.column_type_embedding(new_tensor(raw_column_type_ids, dtype=torch.long))
+                    ],
+                    dim=-1
+                )
 
                 table_column_encoding = type_fused_column_encoding
 
@@ -399,11 +273,7 @@ class BertEncoder(EncoderBase):
         constant_encoding, constant_mask = self.get_constant_encoding(
             question_encoding, batched_context['constant_spans'], constant_value_embedding, table_column_mask)
 
-        context_encoding = {
-            'batch_size': len(env_context),
-            'question_encoding': question_encoding,
-            'question_mask': question_mask,
-            'question_encoding_att_linear': question_encoding_att_linear,
+        context_encoding.update({
             'column_encoding': table_column_encoding,
             'column_mask': table_column_mask,
             'canonical_column_encoding': canonical_column_encoding,
@@ -412,16 +282,47 @@ class BertEncoder(EncoderBase):
             'table_bert_encoding': table_bert_encoding,
             'constant_encoding': constant_encoding,
             'constant_mask': constant_mask
-        }
+        })
 
         return context_encoding
 
     def get_constant_encoding(self, question_token_encoding, constant_span, constant_value_embedding, column_mask):
         """
+        Memory Layout
+        [
+            /* Predefined Functions */
+            hop
+            argmax
+            ...
+            average
+            /* Special Tokens */
+            all_rows
+            ERROR_TOKEN
+            Paratheses: (
+            )
+            /*** The below stuff are called `constant_encoding` ***/
+            /* Table Columns */
+            [-1, -1]    |
+            [-1, -1]    |
+            [-1, -1]    |
+            ...         |    Column encoding from BERT, given by `constant_value_embedding`
+            [-1, -1]    |
+            [-1, -1]    |
+            /* Entity Spans from the Question */
+            [1, 2]      |
+            [3, 5]      |    Computed using the encodings of question tokens in
+                        |    `question_token_encoding` of the span using `constant_span`
+            [7, 10]     |
+            ...
+        ]
+
         Args:
             question_token_encoding: (batch_size, max_question_len, encoding_size)
             constant_span: (batch_size, mem_size, 2)
+                This is the indices of span entities identified in the input question
             constant_value_embedding: (batch_size, constant_value_num, embed_size)
+                This is the encodings of table columns only
+                Encodings of entity spans will be computed later using the encodings of questions
             column_mask: (batch_size, constant_value_num)
         """
         # (batch_size, mem_size)

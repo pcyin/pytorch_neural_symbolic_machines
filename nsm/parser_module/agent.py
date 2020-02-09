@@ -9,7 +9,9 @@ from torch import nn as nn
 from torch.nn import functional as F
 from tqdm import tqdm
 
-from nsm import nn_util, executor_factory, data_utils
+import nsm.execution.worlds.wikitablequestions
+from nsm import nn_util, data_utils
+from nsm.execution import executor_factory
 from nsm.computer_factory import SPECIAL_TKS
 from nsm.env_factory import Trajectory, Observation, Sample, QAProgrammingEnv
 from nsm.parser_module.bert_decoder import BertDecoder
@@ -25,7 +27,6 @@ class PGAgent(nn.Module):
     def __init__(
         self,
         encoder: EncoderBase, decoder: DecoderBase,
-        sketch_predictor: SketchPredictor,
         config: Dict
     ):
         super(PGAgent, self).__init__()
@@ -34,7 +35,6 @@ class PGAgent(nn.Module):
 
         self.encoder = encoder
         self.decoder = decoder
-        self.sketch_predictor = sketch_predictor
 
     @property
     def memory_size(self):
@@ -550,7 +550,7 @@ class PGAgent(nn.Module):
             'row_ents': []
         }
 
-        executor = executor_factory.WikiTableExecutor(dummy_kg)
+        executor = nsm.execution.worlds.wikitablequestions.WikiTableExecutor(dummy_kg)
         api = executor.get_api()
         op_vocab = data_utils.Vocab(
             [f['name'] for f in api['func_dict'].values()] +
@@ -562,14 +562,10 @@ class PGAgent(nn.Module):
         encoder = BertEncoder.build(config, master=master)
         decoder = BertDecoder.build(config, encoder, master=master)
 
-        sketch_predictor = None
-        if config.get('use_trainable_sketch_manager', False):
-            sketch_predictor = SketchPredictor.build(config, encoder=encoder)
-
         return cls(
             encoder, decoder,
-            sketch_predictor=sketch_predictor,
-            config=config)
+            config=config
+        )
 
     def save(self, model_path, kwargs=None):
         ddp = None

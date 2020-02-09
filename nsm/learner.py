@@ -30,7 +30,8 @@ import torch
 from tensorboardX import SummaryWriter
 
 from nsm.dist_util import STOP_SIGNAL
-from nsm.sketch.sketch_predictor import SketchPredictor, SketchManagerTrainer
+from nsm.sketch.sketch_predictor import SketchPredictor
+from nsm.sketch.trainer import SketchPredictorTrainer
 
 
 class Learner(torch_mp.Process):
@@ -60,6 +61,13 @@ class Learner(torch_mp.Process):
         agent_name = self.config.get('parser', 'vanilla')
         self.agent = get_parser_agent_by_name(agent_name).build(self.config, master='learner').to(self.device).train()
 
+        use_trainable_sketch_predictor = self.config.get('use_trainable_sketch_predictor', False)
+        if use_trainable_sketch_predictor:
+            self.sketch_predictor = SketchPredictor.build(self.config).train().to(self.device)
+            self.sketch_predictor_trainer = SketchPredictorTrainer(
+                self.sketch_predictor, self.config['max_train_step'], 0, self.config
+            )
+
         self.train()
 
     def train(self):
@@ -74,6 +82,7 @@ class Learner(torch_mp.Process):
         save_program_cache_niter = config.get('save_program_cache_niter', 0)
         freeze_bert_for_niter = config.get('freeze_bert_niter', 0)
         gradient_accumulation_niter = config.get('gradient_accumulation_niter', 1)
+        use_trainable_sketch_predictor = self.config.get('use_trainable_sketch_predictor', False)
 
         bert_params = [
             (p_name, p)
@@ -119,6 +128,8 @@ class Learner(torch_mp.Process):
             except NotImplementedError:
                 pass
 
+            train_trajectories = [sample.trajectory for sample in train_samples]
+
             # to save memory, for vertical tableBERT, we partition the training trajectories into small chunks
             if isinstance(self.agent.encoder.bert_model, VerticalAttentionTableBert) and 'large' in self.agent.encoder.bert_model.config.base_model_name:
                 chunk_size = 5
@@ -157,6 +168,10 @@ class Learner(torch_mp.Process):
 
             if 'clip_frac' in samples_info:
                 summary_writer.add_scalar('sample_clip_frac', samples_info['clip_frac'], train_iter)
+
+            # update sketch predictor
+            if use_trainable_sketch_predictor:
+                self.sketch_predictor_trainer.step(train_trajectories, train_iter=train_iter)
 
             cum_examples += len(train_samples)
 
@@ -234,14 +249,24 @@ class Learner(torch_mp.Process):
         model_save_path = os.path.join(self.config['work_dir'], 'agent_state.iter%d.bin' % train_iter)
         torch.save(model_state, model_save_path)
 
-        self.push_new_model(model_save_path)
+        if hasattr(self, 'sketch_predictor'):
+            sketch_predictor_path = Path(model_save_path).with_suffix('.sketch_predictor.bin')
+            torch.save(self.sketch_predictor.state_dict(), str(sketch_predictor_path))
+        else:
+            sketch_predictor_path = None
+
+        self.push_new_model(model_save_path, sketch_predictor_path=sketch_predictor_path)
         print(f'[Learner] pushed model [{model_save_path}] (took {time.time() - t1}s)', file=sys.stderr)
 
         if self.current_model_path:
             os.remove(self.current_model_path)
+            table_bert_server_msg_val = getattr(self, 'table_bert_server_msg_val', None)
+            if table_bert_server_msg_val:
+                os.remove(str(Path(self.current_model_path).with_suffix('.sketch_predictor.bin')))
+
         self.current_model_path = model_save_path
 
-    def push_new_model(self, model_path):
+    def push_new_model(self, model_path, sketch_predictor_path=None):
         self.checkpoint_queue.put(model_path)
         if model_path:
             self.eval_msg_val.value = model_path.encode()
@@ -249,6 +274,10 @@ class Learner(torch_mp.Process):
             table_bert_server_msg_val = getattr(self, 'table_bert_server_msg_val', None)
             if table_bert_server_msg_val:
                 table_bert_server_msg_val.value = model_path.encode()
+
+            sketch_predictor_server_msg_val = getattr(self, 'sketch_predictor_server_msg_val', None)
+            if sketch_predictor_server_msg_val:
+                sketch_predictor_server_msg_val.value = str(sketch_predictor_path).encode()
 
     def register_actor(self, actor):
         actor.checkpoint_queue = self.checkpoint_queue
@@ -264,3 +293,8 @@ class Learner(torch_mp.Process):
         msg_val = multiprocessing.Array(ctypes.c_char, 4096)
         self.table_bert_server_msg_val = msg_val
         table_bert_server.learner_msg_val = msg_val
+
+    def register_sketch_predictor_server(self, sketch_predictor_server):
+        msg_val = multiprocessing.Array(ctypes.c_char, 4096)
+        self.sketch_predictor_server_msg_val = msg_val
+        sketch_predictor_server.learner_msg_val = msg_val

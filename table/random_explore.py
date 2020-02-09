@@ -1,17 +1,16 @@
 import json
 import time
 import os
-import random
 import multiprocessing
 from argparse import ArgumentParser
 from pathlib import Path
 
 import numpy as np
 
-import nsm
+import nsm.execution.worlds.wikitablequestions
 from nsm import data_utils
 from nsm import env_factory
-from nsm import executor_factory
+from nsm.execution import executor_factory
 from nsm import computer_factory
 from table.utils import wtq_score
 
@@ -86,7 +85,7 @@ def run_random_exploration(shard_id):
     if args.executor == 'wtq':
         score_fn = wtq_score
         process_answer_fn = lambda x: x
-        executor_fn = executor_factory.WikiTableExecutor
+        executor_fn = nsm.execution.worlds.wikitablequestions.WikiTableExecutor
     elif args.executor == 'wikisql':
         raise NotImplementedError()
     else:

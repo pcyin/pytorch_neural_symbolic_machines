@@ -68,7 +68,7 @@ class ContentBasedEncoder(BertEncoder):
             config=config
         )
 
-    def _bert_encode(self, env_context: List[Dict]) -> Any:
+    def bert_encode(self, env_context: List[Dict]) -> Any:
         question_encoding, table_encoding, info = self.bert_model.encode(
             [e['question_tokens'] for e in env_context],
             [e['table'].with_rows(e['table'].data[:self.max_row_num]) for e in env_context]
@@ -84,7 +84,7 @@ class ContentBasedEncoder(BertEncoder):
     def encode(self, env_context: List[Dict]) -> ContextEncoding:
         batched_context = self.example_list_to_batch(env_context)
 
-        question_encoding_dict, table_encoding_dict, encoding_info = self._bert_encode(env_context)
+        question_encoding_dict, table_encoding_dict, encoding_info = self.bert_encode(env_context)
 
         # remove leading [CLS] symbol
         question_encoding = question_encoding_dict['value'][:, 1:]

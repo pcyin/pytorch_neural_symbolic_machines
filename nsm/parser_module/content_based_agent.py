@@ -1,23 +1,13 @@
-import collections
-import math
-import sys
-from collections import OrderedDict
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
-import torch
-from torch import nn as nn
-from torch.nn import functional as F
-from tqdm import tqdm
-
-from nsm import nn_util, executor_factory, data_utils
+import nsm.execution.worlds.wikitablequestions
+from nsm import data_utils
+from nsm.execution import executor_factory
 from nsm.computer_factory import SPECIAL_TKS
-from nsm.env_factory import Trajectory, Observation, Sample, QAProgrammingEnv
 from nsm.parser_module import PGAgent
-from nsm.parser_module.bert_decoder import BertDecoder
-from nsm.parser_module.bert_encoder import BertEncoder
 from nsm.parser_module.content_based_decoder import ContentBasedDecoder
 from nsm.parser_module.content_based_encoder import ContentBasedEncoder
-from nsm.parser_module.decoder import DecoderBase, Hypothesis, DecoderState
+from nsm.parser_module.decoder import DecoderBase
 from nsm.parser_module.encoder import EncoderBase
 from nsm.sketch.sketch_predictor import SketchPredictor
 
@@ -49,7 +39,7 @@ class ContentBasedAgent(PGAgent):
             'row_ents': []
         }
 
-        executor = executor_factory.WikiTableExecutor(dummy_kg)
+        executor = nsm.execution.worlds.wikitablequestions.WikiTableExecutor(dummy_kg)
         api = executor.get_api()
         op_vocab = data_utils.Vocab(
             [f['name'] for f in api['func_dict'].values()] +

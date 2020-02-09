@@ -18,6 +18,7 @@ import torch
 
 from nsm.replay_buffer import ReplayBuffer
 from nsm.sketch.sketch import SketchManager
+from nsm.sketch.sketch_predictor import SketchPredictor, SketchPredictorProxy
 
 
 class Actor(torch_mp.Process):
@@ -76,6 +77,12 @@ class Actor(torch_mp.Process):
 
         agent_name = self.config.get('parser', 'vanilla')
         self.agent = get_parser_agent_by_name(agent_name).build(self.config, master=self.actor_id).to(self.device).eval()
+
+        # initialize sketch predictor
+        use_trainable_sketch_predictor = self.config.get('use_trainable_sketch_predictor', False)
+        if use_trainable_sketch_predictor:
+            self.sketch_predictor = SketchPredictorProxy()
+            self.sketch_predictor.initialize(self)
 
         if self.config.get('actor_use_table_bert_proxy', False):
             # initialize proxy
@@ -146,12 +153,12 @@ class Actor(torch_mp.Process):
                             num_sketches_per_example = config.get('num_candidate_sketches', 5)
                             remove_explored_sketch = config.get('remove_explored_sketch', True)
                             use_sketch_exploration_for_nepoch = config.get('use_sketch_exploration_for_nepoch', 10000)
-                            use_trainable_sketch_manager = config.get('use_trainable_sketch_manager', False)
+                            use_trainable_sketch_predictor = self.config.get('use_trainable_sketch_predictor', False)
 
                             if epoch_id <= use_sketch_exploration_for_nepoch:
                                 t1 = time.time()
-                                if use_trainable_sketch_manager:
-                                    candidate_sketches = self.agent.sketch_predictor.get_sketches(
+                                if use_trainable_sketch_predictor:
+                                    candidate_sketches = self.sketch_predictor.get_sketches(
                                         batched_envs,
                                         K=num_sketches_per_example
                                     )
@@ -177,6 +184,8 @@ class Actor(torch_mp.Process):
                                     constraint_sketches[env.name] = env_candidate_sketches
 
                                 # logging
+                                # print('[Actor] Sampled sketches', file=sys.stderr)
+                                # print(constraint_sketches, file=sys.stderr)
                                 if debug_file:
                                     print(f'Found candidate sketches took {time.time() - t1}s', file=debug_file)
                                     for env in batched_envs:
@@ -239,7 +248,7 @@ class Actor(torch_mp.Process):
                             replay_constraint_sketches = dict()
                             num_sketches_per_example = config.get('num_candidate_sketches', 5)
 
-                            env_candidate_sketches = self.agent.sketch_predictor.get_sketches(batched_envs)
+                            env_candidate_sketches = self.sketch_predictor.get_sketches(batched_envs)
                             env_selected_candidate_sketches = sorted(
                                 env_candidate_sketches,
                                 key=lambda s: env_candidate_sketches[s]['score'],

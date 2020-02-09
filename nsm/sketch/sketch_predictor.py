@@ -1,46 +1,28 @@
-import json
+import multiprocessing
 import sys
+import time
 from collections import namedtuple
-from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
 import torch.nn.utils
-from table_bert.vanilla_table_bert import VanillaTableBert
-from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence
 import numpy as np
 
-
-from pytorch_pretrained_bert import BertTokenizer
-from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertModel, BertConfig, BertForMaskedLM, \
-    BertForPreTraining
-from pytorch_pretrained_bert import BertAdam
-from typing import List, Tuple, Any, Dict, Optional, Union
+from pytorch_pretrained_bert.modeling import BertModel
+from typing import List, Tuple, Any, Dict, Optional
 
 from nsm import nn_util
 from nsm.env_factory import Environment, Trajectory
-from nsm.executor_factory import SimpleKGExecutor, TableExecutor
+from nsm.execution.worlds.wikitablequestions import world_config
 from nsm.parser_module.bert_encoder import BertEncoder
+from nsm.parser_module.table_bert_helper import get_table_bert_model
 from nsm.sketch.sketch import Sketch
 
 SketchEncoding = Dict[str, torch.Tensor]
 
 
 Hypothesis = namedtuple('Hypothesis', ['value', 'score'])
-
-
-def get_executor_api():
-    dummy_kg = {
-        'kg': None,
-        'num_props': [],
-        'datetime_props': [],
-        'props': [],
-        'row_ents': []
-    }
-
-    api = TableExecutor(dummy_kg).get_api()
-
-    return api
 
 
 class SketchPredictor(nn.Module):
@@ -95,11 +77,6 @@ class SketchPredictor(nn.Module):
             bias=False
         )
 
-        # self.column_encoding_projection = nn.Linear(
-        #     self.encoder_model.bert_model.config.hidden_size, self.src_encoding_size,
-        #     bias=False
-        # )
-
         self.column_attention_value_to_key = nn.Linear(
             self.src_encoding_size,
             hidden_size, bias=False
@@ -126,7 +103,7 @@ class SketchPredictor(nn.Module):
             bias=False
         )
 
-        self.executor_api = get_executor_api()
+        self.executor_api = world_config['executor_api']
         operators = sorted(self.executor_api['func_dict'])
         self.sketch_vocab = {
             token: idx
@@ -165,22 +142,9 @@ class SketchPredictor(nn.Module):
             if isinstance(_module, nn.Linear) and _module.bias is not None:
                 _module.bias.data.zero_()
 
-        # for module_name, module in self.named_modules():
-        #     if 'encoder_model' not in module_name:
-        #         # print(module_name)
-        #         module.apply(_init_weights)
-
-        # torch.nn.init.eye_(self.column_encoding_with_feature.weight)
-
-        for module in [
-            self.column_attention_value_to_key, self.column_encoding_projection,
-            self.decoder_lstm,
-            self.decoder_att_vec_linear, self.decoder_init_linear,
-            self.readout, self.sketch_token_embedding
-        ]:
-            module.apply(_init_weights)
-
-        self.column_encoding_projection.apply(_init_weights)
+        for module_name, module in self.named_modules():
+            if 'bert_model' not in module_name:
+                module.apply(_init_weights)
 
     @property
     def device(self):
@@ -193,9 +157,14 @@ class SketchPredictor(nn.Module):
 
         if params['sketch_decoder_use_table_bert']:
             if params['sketch_decoder_use_parser_table_bert']:
-                bert_model = kwargs['encoder'].bert_model
+                raise RuntimeError('Does not support this option!')
+                # bert_model = kwargs['encoder'].bert_model
             else:
-                bert_model = BertEncoder.get_table_bert_model(config, VanillaTableBert)
+                bert_model = get_table_bert_model(
+                    config,
+                    use_proxy=False,
+                    master='sketch_predictor'
+                )
         else:
             bert_model = BertModel.from_pretrained(params['bert_model'])
 
@@ -368,45 +337,6 @@ class SketchPredictor(nn.Module):
 
         return sketch_log_prob
 
-    def old_encode(self, env_contexts: List, context_encoding: Dict = None):
-        bert_input = [
-            Example(question=e['question_tokens'], table=e['table'])
-            for e in env_contexts
-        ]
-
-        question_encoding, table_column_encoding, info = self.encoder_model.bert_model.encode(bert_input)
-
-        context_encoding = {
-            'question_encoding': question_encoding,
-            'column_encoding': table_column_encoding,
-        }
-        context_encoding.update(info['tensor_dict'])
-
-        src_encoding_var = self.src_encoding_projection(
-            context_encoding['question_encoding'])
-
-        src_encodings = {
-            'value': src_encoding_var,
-            'key': self.src_attention_value_to_key(
-                src_encoding_var),
-            'mask': context_encoding['question_token_mask']
-        }
-
-        column_encoding_var = self.column_encoding_projection(
-            context_encoding['column_encoding'])
-
-        column_encodings = {
-            'value': column_encoding_var,
-            'key': self.column_attention_value_to_key(
-                column_encoding_var),
-            'mask': context_encoding['column_mask']
-        }
-
-        decoder_state_init_vec = question_encoding[:, 0]  # encoding of the [CLS] label
-        decoder_init_state = self.decoder_init(decoder_state_init_vec)
-
-        return src_encodings, column_encodings, decoder_init_state
-
     def encode(self, env_contexts: List, context_encoding: Dict = None):
         if context_encoding is None:
             context_encoding = self.encoder_model.encode(env_contexts)
@@ -423,15 +353,18 @@ class SketchPredictor(nn.Module):
 
         if self.use_column_feature:
             # add output features here!
-            output_features = np.zeros((
-                len(env_contexts),
-                max_column_num,
-                self.encoder_model.column_feature_num),
+            output_features = np.zeros(
+                (
+                    len(env_contexts),
+                    max_column_num,
+                    self.encoder_model.column_feature_num
+                ),
                 dtype=np.float32
             )
 
             for example_id, env_context in enumerate(env_contexts):
-                column_info = env_context['table'].header
+                table = env_context['table']
+                column_info = env_context['table'].column_info
                 mem_id_feat_dict = env_context['id_feature_dict']
                 constant_val_id_start = self.encoder_model.builtin_func_num
 
@@ -494,53 +427,6 @@ class SketchPredictor(nn.Module):
 
         return src_encodings, column_encodings, decoder_init_state
 
-    def _encode(self, input_ids, segment_ids, attention_mask):
-        bert_sequence_output, _ = self.encoder_model(
-            input_ids,
-            segment_ids,
-            attention_mask,
-            output_all_encoded_layers=False
-        )
-
-        if self.use_lstm_encoder:
-            src_lens = [
-                int(l)
-                for l
-                in attention_mask.sum(-1).cpu().tolist()
-            ]
-            packed_input = pack_padded_sequence(
-                bert_sequence_output, src_lens,
-                batch_first=True, enforce_sorted=False
-            )
-
-            src_encodings, (sorted_last_state, sorted_last_cell) = self.lstm_encoder(packed_input)
-            src_encodings, _ = pad_packed_sequence(src_encodings, batch_first=True)
-
-            # (num_directions, batch_size, hidden_size)
-            last_cell = sorted_last_cell.index_select(1, packed_input.unsorted_indices)
-            # (batch_size, num_directions * hidden_size)
-            last_states = torch.cat([last_cell[0], last_cell[1]], dim=-1)
-
-            # size = list(src_encodings.size())[:-1] + [2, -1]
-            # # (batch_size, sequence_len, num_directions, hidden_size)
-            # src_encodings_directional = src_encodings.view(*size)
-            #
-            # # (batch_size, sequence_len, hidden_size)
-            # fwd_encodings = src_encodings_directional[:, :, 0, :]
-            # bak_encoding = src_encodings_directional[:, :, 1, :]
-            #
-            # fwd_last_state = fwd_encodings[:, [l - 1 for l in src_lens], :]
-            # bak_last_state = bak_encoding[:, 0, :]
-            #
-            # last_states = torch.cat([fwd_last_state, bak_last_state], dim=-1)
-        else:
-            src_encodings = bert_sequence_output
-            last_states = bert_sequence_output[:, 0]
-
-        decoder_init_state = self.decoder_init(src_encodings, last_states)
-
-        return src_encodings, decoder_init_state
-
     def decoder_init(
         self,
         init_vec: torch.Tensor
@@ -585,7 +471,7 @@ class SketchPredictor(nn.Module):
 
         return att_ves
 
-    def get_sketches(self, envs: List[Environment], K=5):
+    def get_sketches(self, env_context: List[Dict], K=5):
         # get context encoding from table BERT
         # question_encoding, column_encoding, info = self.bert_model.encode([
         #     Example(question=e.context['question_tokens'], table=e.context['table'])
@@ -598,14 +484,13 @@ class SketchPredictor(nn.Module):
         # }
         # context_encoding.update(info['tensor_dict'])
 
-        env_context = [env.context for env in envs]
         src_encodings, column_encodings, decoder_init_state = self.encode(env_context)
 
-        return self.beam_search(envs, src_encodings, column_encodings, decoder_init_state, beam_size=K)
+        return self.beam_search(env_context, src_encodings, column_encodings, decoder_init_state, beam_size=K)
 
     def beam_search(
             self,
-            examples: List[Any],
+            examples: List[Dict],
             src_encodings: Dict,
             column_encodings: Dict,
             decoder_init_state: Tuple[torch.Tensor, torch.Tensor],
@@ -747,185 +632,143 @@ class SketchPredictor(nn.Module):
         return sketch
 
 
-class SketchEncoder(nn.Module):
-    def __init__(
-            self,
-            output_size: int,
-            embedding: nn.Embedding = None,
-            embedding_size: int = None,
-            vocab: Dict = None
-    ):
-        super(SketchEncoder, self).__init__()
+class SketchPredictorProxy(object):
+    def __init__(self):
+        pass
 
-        self.vocab = vocab
-        self.embedding = embedding
+    def initialize(self, actor):
+        self.request_queue = actor.sketch_predictor_request_queue
+        self.result_queue = actor.sketch_predictor_result_queue
+        self.actor = actor
 
-        if self.vocab is None:
-            self.executor_api = get_executor_api()
-            operators = sorted(self.executor_api['func_dict'])
-            self.vocab = {
-                token: idx
-                for idx, token
-                in enumerate(['<s>', '</s>', 'v', '(', ')', '<END>'] + operators)
-            }
+        self.worker_id = actor.actor_id
 
-        if embedding is None:
-            self.embedding = nn.Embedding(len(self.vocab), embedding_size)
+    def get_sketches(self, envs: List[Environment], K=5):
+        env_context = [env.context for env in envs]
 
-        self.output_size = output_size
-        self.lstm = nn.LSTM(
-            self.embedding.embedding_dim, output_size // 2, bidirectional=True, batch_first=True)
-
-        self.init_weights()
-
-    def init_weights(self):
-        print('Init sketch encoder weights')
-
-        def _init_weights(_module):
-            if isinstance(_module, (nn.Linear, nn.Embedding)):
-                _module.weight.data.normal_(mean=0.0, std=0.02)
-            if isinstance(_module, nn.Linear) and _module.bias is not None:
-                _module.bias.data.zero_()
-
-        for module in [
-            self.embedding
-        ]:
-            module.apply(_init_weights)
-
-    @classmethod
-    def build(cls, config: Dict, sketch_predictor: SketchPredictor):
-        output_size = config.get('en_embedding_size', 100)
-        embedding_size = config.get('sketch_decoder_token_embed_size', 128)
-
-        return cls(
-            output_size,
-            embedding_size=embedding_size
-        )
-
-    @property
-    def device(self) -> torch.device:
-        return next(self.parameters()).device
-
-    def to_input_tensor(self, sketches: List[Sketch]):
-        batch_size = len(sketches)
-        max_len = max(len(sketch) for sketch in sketches)
-
-        token_id = np.zeros((batch_size, max_len), np.int64)
-        token_mask = np.zeros((batch_size, max_len), np.float32)
-        variable_mask = np.zeros((batch_size, max_len), np.float32)
-
-        for i in range(batch_size):
-            sketch = sketches[i]
-            tokens = sketch.tokens
-            for t, token in enumerate(tokens):
-                is_slot = sketch.is_variable_slot(token)
-                token_id[i, t] = self.vocab[token]
-                variable_mask[i, t] = is_slot
-            token_mask[i, :len(tokens)] = 1.
-
-        token_id = torch.from_numpy(token_id).to(self.device)
-        token_mask = torch.from_numpy(token_mask).to(self.device)
-        variable_mask = torch.from_numpy(variable_mask).to(self.device)
-
-        return token_id, token_mask, variable_mask
-
-    def forward(self, sketches: List[Sketch]):
-        sketch_lens = [len(sketch) for sketch in sketches]
-        # (batch_size, max_sketch_len)
-        token_id, token_mask, var_time_step_mask = self.to_input_tensor(sketches)
-
-        # (batch_size, max_sketch_len, embedding_dim)
-        token_embedding = self.embedding(token_id)
-
-        packed_embedding = pack_padded_sequence(
-            token_embedding, sketch_lens,
-            batch_first=True, enforce_sorted=False
-        )
-
-        # (batch_size, max_sketch_len, output_size)
-        token_encoding, (sorted_last_state, sorted_last_cell) = self.lstm(packed_embedding)
-        token_encoding, _ = pad_packed_sequence(token_encoding, batch_first=True)
-        token_encoding = token_encoding * token_mask.unsqueeze(-1)
-
-        # (num_directions, batch_size, hidden_size)
-        last_state = sorted_last_state.index_select(dim=1, index=packed_embedding.unsorted_indices)
-        cat_last_state = torch.cat([last_state[0], last_state[1]], dim=-1)
-
-        encoding_dict = {
-            'value': token_encoding,
-            'mask': token_mask,
-            'var_time_step_mask': var_time_step_mask,
-            'last_state': cat_last_state
+        request = {
+            'worker_id': self.worker_id,
+            'payload': (env_context, K)
         }
 
-        return encoding_dict
+        self.request_queue.put(request)
+
+        response = self.result_queue.get()
+        sketches = response
+        # sketches = response['sketches']
+
+        return sketches
 
 
-class SketchManagerTrainer(object):
-    def __init__(self, model: SketchPredictor, num_train_step: int, freeze_bert_for_niter: int, config: Dict):
-        self.model = model
+class SketchPredictorServer(multiprocessing.Process):
+    def __init__(
+        self,
+        config: Dict,
+        device: str
+    ):
+        super(SketchPredictorServer, self).__init__()
+        
+        self.request_queue = multiprocessing.Queue()
+        self.workers = dict()
 
-        no_grad = ['pooler']
-        if self.model.use_table_bert:
-            bert_params = no_decay = []
+        self.config = config
+        self.target_device = device
+
+        self.model_path: Optional[str] = None
+        self.learner_msg_val: multiprocessing.Value = None
+
+    @property
+    def device(self):
+        return next(self.sketch_predictor.parameters()).device
+
+    def register_worker(self, actor):
+        sketch_predictor_result_queue = getattr(actor, 'sketch_predictor_result_queue', None)
+        if not sketch_predictor_result_queue:
+            sketch_predictor_result_queue = multiprocessing.Queue()
+            setattr(actor, 'sketch_predictor_result_queue', sketch_predictor_result_queue)
+
+        self.workers[actor.actor_id] = SimpleNamespace(
+            result_queue=sketch_predictor_result_queue
+        )
+        setattr(actor, 'sketch_predictor_request_queue', self.request_queue)
+
+    def init_server(self):
+        target_device = self.target_device
+        if 'cuda' in str(target_device):
+            torch.cuda.set_device(target_device)
+
+        self.sketch_predictor = SketchPredictor.build(
+            self.config,
+        ).to(target_device).eval()
+
+    def run(self):
+        print('[SketchPredictorServer] Init sketch predictor...', file=sys.stderr)
+        self.init_server()
+        print('[SketchPredictorServer] Init success', file=sys.stderr)
+
+        cum_request_num = 0.
+        cum_model_ver_not_match_num = 0.
+        cum_process_time = 0.
+        with torch.no_grad():
+            while True:
+                request = self.request_queue.get()
+
+                cum_request_num += 1.
+
+                payload = request['payload']
+                worker_id = request['worker_id']
+
+                t1 = time.time()
+                encode_result = self.sketch_predictor.get_sketches(*payload)
+                packed_result = self.pack_encode_result(encode_result)
+                t2 = time.time()
+
+                self.workers[worker_id].result_queue.put(packed_result)
+
+                cum_process_time += t2 - t1
+                if cum_request_num % 1 == 0:
+                    print(f'[SketchPredictorServer] cum. request={cum_request_num}, '
+                          f'speed={cum_request_num / cum_process_time} requests/s',
+                          file=sys.stderr)
+
+                self.check_and_load_new_model()
+
+    def pack_encode_result(self, encode_result: Any) -> Any:
+        def _to_numpy_array(obj):
+            if isinstance(obj, tuple):
+                return tuple(_to_numpy_array(x) for x in obj)
+            elif isinstance(obj, list):
+                return list(_to_numpy_array(x) for x in obj)
+            elif isinstance(obj, dict):
+                return {
+                    key: _to_numpy_array(val)
+                    for key, val
+                    in obj.items()
+                }
+            elif torch.is_tensor(obj):
+                return obj.cpu().numpy()
+            else:
+                return obj
+
+        packed_result = _to_numpy_array(encode_result)
+
+        return packed_result
+
+    def check_and_load_new_model(self):
+        new_model_path = self.learner_msg_val.value.decode()
+
+        if new_model_path and new_model_path != self.model_path:
+            t1 = time.time()
+
+            state_dict = torch.load(new_model_path, map_location=lambda storage, loc: storage)
+
+            self.sketch_predictor.load_state_dict(state_dict)
+            self.model_path = new_model_path
+            self.sketch_predictor.eval()
+
+            t2 = time.time()
+            print('[SketchPredictorServer] loaded new model [%s] (took %.2f s)' % (new_model_path, t2 - t1), file=sys.stderr)
+
+            return True
         else:
-            bert_params = list([
-                (p_name, p)
-                for (p_name, p) in model.encoder_model.named_parameters()
-                if not any(pn in p_name for pn in no_grad) and p.requires_grad])
-            no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-
-        bert_grouped_parameters = [
-            {'params': [p for n, p in bert_params if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-            {'params': [p for n, p in bert_params if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-        ]
-
-        # print(bert_grouped_parameters)
-
-        self.other_params = [
-            p
-            for n, p
-            in model.named_parameters()
-            if 'encoder_model' not in n and p.requires_grad
-        ]
-
-        self.bert_optimizer = BertAdam(
-            bert_grouped_parameters,
-            lr=config['bert_learning_rate'],
-            warmup=0.1,
-            t_total=num_train_step)
-
-        self.optimizer = torch.optim.Adam(
-            self.other_params,
-            lr=0.001)
-
-        self.freeze_bert_for_niter = freeze_bert_for_niter
-
-    def step(self, trajectories: List[Trajectory], train_iter: int, context_encoding: Dict = None):
-        questions = [
-            traj.context['question_tokens']
-            for traj in trajectories
-        ]
-
-        sketches = [
-            Sketch(traj.program)
-            for traj in trajectories
-        ]
-
-        self.bert_optimizer.zero_grad()
-        self.optimizer.zero_grad()
-
-        sketch_log_prob = self.model(questions, sketches, context_encoding)
-        sketch_loss = -sketch_log_prob.mean()
-        sketch_loss.backward()
-
-        if train_iter % 10 == 0:
-            print(f'[SketchManagerTrainer] loss={sketch_loss.item()}', file=sys.stderr)
-
-        torch.nn.utils.clip_grad_norm_(self.other_params, 5.)
-
-        self.optimizer.step()
-        if train_iter > self.freeze_bert_for_niter:
-            self.bert_optimizer.step()
-        elif train_iter == self.freeze_bert_for_niter:
-            self.optimizer = torch.optim.Adam(self.other_params, lr=0.001)
+            return False

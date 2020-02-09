@@ -7,19 +7,20 @@ from typing import Dict, List
 import numpy as np
 import torch
 from torch import nn as nn
-from torch.nn import functional as F
-from tqdm import tqdm
 
-from nsm import nn_util, executor_factory, data_utils
+import nsm.execution.worlds.wikitablequestions
+from nsm import nn_util, data_utils
+from nsm.execution import executor_factory
 from nsm.parser_module.agent import PGAgent
 from nsm.computer_factory import SPECIAL_TKS
-from nsm.env_factory import Trajectory, Observation, Sample, QAProgrammingEnv
+from nsm.env_factory import Trajectory, Observation, Sample
 from nsm.parser_module.bert_encoder import BertEncoder
-from nsm.parser_module.decoder import DecoderBase, Hypothesis, DecoderState
+from nsm.parser_module.decoder import DecoderBase
 from nsm.parser_module.encoder import EncoderBase
 from nsm.parser_module.sketch_guided_decoder import SketchGuidedDecoder
 from nsm.sketch.sketch import Sketch
-from nsm.sketch.sketch_predictor import SketchPredictor, SketchEncoder
+from nsm.sketch.sketch_predictor import SketchPredictor
+from nsm.sketch.sketch_encoder import SketchEncoder
 
 
 class SketchGuidedAgent(PGAgent):
@@ -630,7 +631,7 @@ class SketchGuidedAgent(PGAgent):
             'row_ents': []
         }
 
-        executor = executor_factory.WikiTableExecutor(dummy_kg)
+        executor = nsm.execution.worlds.wikitablequestions.WikiTableExecutor(dummy_kg)
         api = executor.get_api()
         op_vocab = data_utils.Vocab(
             [f['name'] for f in api['func_dict'].values()] +
