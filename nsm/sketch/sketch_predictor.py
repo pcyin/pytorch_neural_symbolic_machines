@@ -152,6 +152,9 @@ class SketchPredictor(nn.Module):
 
     @classmethod
     def build(cls, config, **kwargs):
+        from nsm.execution.worlds.wikitablequestions import world_config as wikitablequestions_config
+        config['builtin_func_num'] = wikitablequestions_config['interpreter_builtin_func_num']
+
         params = cls.default_params()
         params.update(config)
 

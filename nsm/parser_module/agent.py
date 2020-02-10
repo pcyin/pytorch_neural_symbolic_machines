@@ -542,22 +542,8 @@ class PGAgent(nn.Module):
 
     @classmethod
     def build(cls, config, params=None, master=None):
-        dummy_kg = {
-            'kg': None,
-            'num_props': [],
-            'datetime_props': [],
-            'props': [],
-            'row_ents': []
-        }
-
-        executor = nsm.execution.worlds.wikitablequestions.WikiTableExecutor(dummy_kg)
-        api = executor.get_api()
-        op_vocab = data_utils.Vocab(
-            [f['name'] for f in api['func_dict'].values()] +
-            ['all_rows'] +
-            SPECIAL_TKS
-        )
-        config['builtin_func_num'] = op_vocab.size
+        from nsm.execution.worlds.wikitablequestions import world_config as wikitablequestions_config
+        config['builtin_func_num'] = wikitablequestions_config['interpreter_builtin_func_num']
 
         encoder = BertEncoder.build(config, master=master)
         decoder = BertDecoder.build(config, encoder, master=master)
