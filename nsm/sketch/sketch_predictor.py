@@ -67,7 +67,7 @@ class SketchPredictor(nn.Module):
         col_feat_num = self.encoder_model.column_feature_num if self.use_column_feature else 0
 
         if use_canonical_column_representation:
-            column_proj_in_feat = self.encoder_model.bert_model.config.hidden_size + col_feat_num
+            column_proj_in_feat = self.encoder_model.bert_model.bert_config.hidden_size + col_feat_num
         else:
             column_proj_in_feat = self.src_encoding_size + col_feat_num
 
@@ -83,7 +83,7 @@ class SketchPredictor(nn.Module):
         )
 
         self.decoder_init_linear = nn.Linear(
-            self.encoder_model.bert_model.config.hidden_size,
+            self.encoder_model.bert_model.bert_config.hidden_size,
             self.hidden_size
         )
 
@@ -135,7 +135,7 @@ class SketchPredictor(nn.Module):
         print('Init sketch generator weights')
 
         def _init_weights(_module):
-            initializer_range = self.encoder_model.bert_model.config.initializer_range
+            initializer_range = self.encoder_model.bert_model.bert_config.initializer_range
 
             if isinstance(_module, (nn.Linear, nn.Embedding)):
                 _module.weight.data.normal_(mean=0.0, std=initializer_range)
@@ -338,8 +338,19 @@ class SketchPredictor(nn.Module):
         return sketch_log_prob
 
     def encode(self, env_contexts: List, context_encoding: Dict = None):
+        # print(self.device)
+        # if self.device.index == 1:
+        #     from fairseq import pdb
+        #     pdb.set_trace()
+
         if context_encoding is None:
             context_encoding = self.encoder_model.encode(env_contexts)
+
+        # for key, val in context_encoding.items():
+        #     if torch.is_tensor(val):
+        #         print(f'[SketchPredictor] {key}.device={val.device}', file=sys.stderr)
+        #
+        # print(f'[SketchPredictor] device={self.device}', file=sys.stderr)
 
         src_encodings = {
             'value': context_encoding['question_encoding'],
@@ -369,7 +380,7 @@ class SketchPredictor(nn.Module):
                 constant_val_id_start = self.encoder_model.builtin_func_num
 
                 if self.use_canonical_column_representation:
-                    canonical_column_num = len(column_info['columns'])
+                    canonical_column_num = len(table.header)
                     for col_idx in range(canonical_column_num):
                         raw_col_indices = [
                             idx
@@ -726,7 +737,7 @@ class SketchPredictorServer(multiprocessing.Process):
                 self.workers[worker_id].result_queue.put(packed_result)
 
                 cum_process_time += t2 - t1
-                if cum_request_num % 1 == 0:
+                if cum_request_num % 100 == 0:
                     print(f'[SketchPredictorServer] cum. request={cum_request_num}, '
                           f'speed={cum_request_num / cum_process_time} requests/s',
                           file=sys.stderr)

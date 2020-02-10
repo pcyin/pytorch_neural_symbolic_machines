@@ -435,19 +435,20 @@ def distributed_train(args):
     if use_cuda:
         print(f'use cuda', file=sys.stderr)
         device_count = torch.cuda.device_count()
-        assert device_count >= 2
-        learner_device = 'cuda:0'  # torch.device('cuda', 0)
-        evaluator_device = learner_device
+        assert device_count >= 3
+        learner_devices = ['cuda:0', 'cuda:1']  # torch.device('cuda', 0)
+        evaluator_device = learner_devices[0]
         # evaluator_device = 'cuda:1'  # torch.device('cuda', 1)
-        table_bert_server_device = 'cuda:1'
-        sketch_predictor_device = 'cuda:1'
+        table_bert_server_device = 'cuda:2'
+        sketch_predictor_device = 'cuda:2'
 
-        for i in range(2, device_count):
+        for i in range(3, device_count):
             actor_devices.append(f'cuda:{i}')
         else:
             actor_devices.append('cpu')
     else:
-        learner_device = evaluator_device = torch.device('cpu')
+        learner_devices = [torch.device('cpu'), torch.device('cpu')]
+        evaluator_device = torch.device('cpu')
         actor_devices.append(torch.device('cpu'))
         table_bert_server_device = torch.device('cpu')
         sketch_predictor_device = torch.device('cpu')
@@ -457,7 +458,7 @@ def distributed_train(args):
     learner = Learner(
         config={**config, **{'seed': seed}},
         shared_program_cache=shared_program_cache,
-        device=learner_device
+        devices=learner_devices
     )
 
     print(f'Evaluator uses device {evaluator_device}', file=sys.stderr)

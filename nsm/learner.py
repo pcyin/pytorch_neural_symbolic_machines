@@ -7,7 +7,7 @@ import random
 import time
 from itertools import chain
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Union
 
 import numpy as np
 import sys
@@ -35,13 +35,13 @@ from nsm.sketch.trainer import SketchPredictorTrainer
 
 
 class Learner(torch_mp.Process):
-    def __init__(self, config: Dict, device: torch.device, shared_program_cache: SharedProgramCache = None):
+    def __init__(self, config: Dict, devices: Union[List[torch.device], torch.device], shared_program_cache: SharedProgramCache = None):
         super(Learner, self).__init__(daemon=True)
 
         self.train_queue = multiprocessing.Queue()
         self.checkpoint_queue = multiprocessing.Queue()
         self.config = config
-        self.device = device
+        self.devices = devices
         self.actor_message_vars = []
         self.current_model_path = None
         self.shared_program_cache = shared_program_cache
@@ -50,20 +50,26 @@ class Learner(torch_mp.Process):
 
     def run(self):
         # initialize cuda context
-        self.device = torch.device(self.device)
+        devices = self.devices if isinstance(self.devices, list) else [self.devices]
+        self.devices = [torch.device(device) for device in devices]
 
-        if 'cuda' in self.device.type:
-            torch.cuda.set_device(self.device)
+        if 'cuda' in self.devices[0].type:
+            torch.cuda.set_device(self.devices[0])
 
         # seed the random number generators
-        nn_util.init_random_seed(self.config['seed'], self.device)
+        for device in self.devices:
+            nn_util.init_random_seed(self.config['seed'], device)
 
         agent_name = self.config.get('parser', 'vanilla')
-        self.agent = get_parser_agent_by_name(agent_name).build(self.config, master='learner').to(self.device).train()
+        self.agent = get_parser_agent_by_name(agent_name).build(self.config, master='learner').to(self.devices[0]).train()
 
         use_trainable_sketch_predictor = self.config.get('use_trainable_sketch_predictor', False)
         if use_trainable_sketch_predictor:
-            self.sketch_predictor = SketchPredictor.build(self.config).train().to(self.device)
+            assert len(self.devices) > 1
+            if 'cuda' in self.devices[1].type:
+                torch.cuda.set_device(self.devices[1])
+
+            self.sketch_predictor = SketchPredictor.build(self.config).train().to(self.devices[1])
             self.sketch_predictor_trainer = SketchPredictorTrainer(
                 self.sketch_predictor, self.config['max_train_step'], 0, self.config
             )
@@ -116,6 +122,9 @@ class Learner(torch_mp.Process):
         t1 = time.time()
 
         while train_iter < max_train_step:
+            if 'cuda' in self.devices[0].type:
+                torch.cuda.set_device(self.devices[0])
+
             train_iter += 1
             other_optimizer.zero_grad()
             bert_optimizer.zero_grad()
@@ -171,6 +180,9 @@ class Learner(torch_mp.Process):
 
             # update sketch predictor
             if use_trainable_sketch_predictor:
+                if 'cuda' in self.devices[1].type:
+                    torch.cuda.set_device(self.devices[1])
+
                 self.sketch_predictor_trainer.step(train_trajectories, train_iter=train_iter)
 
             cum_examples += len(train_samples)
@@ -249,19 +261,21 @@ class Learner(torch_mp.Process):
         model_save_path = os.path.join(self.config['work_dir'], 'agent_state.iter%d.bin' % train_iter)
         torch.save(model_state, model_save_path)
 
-        if hasattr(self, 'sketch_predictor'):
-            sketch_predictor_path = Path(model_save_path).with_suffix('.sketch_predictor.bin')
-            torch.save(self.sketch_predictor.state_dict(), str(sketch_predictor_path))
+        if hasattr(self, 'sketch_predictor_server_msg_val'):
+            sketch_predictor_path = str(Path(model_save_path).with_suffix('.sketch_predictor.bin'))
+            torch.save(self.sketch_predictor.state_dict(), sketch_predictor_path)
         else:
             sketch_predictor_path = None
 
         self.push_new_model(model_save_path, sketch_predictor_path=sketch_predictor_path)
         print(f'[Learner] pushed model [{model_save_path}] (took {time.time() - t1}s)', file=sys.stderr)
+        if sketch_predictor_path:
+            print(f'[Learner] pushed sketch prediction model [{sketch_predictor_path}] (took {time.time() - t1}s)', file=sys.stderr)
 
         if self.current_model_path:
             os.remove(self.current_model_path)
-            table_bert_server_msg_val = getattr(self, 'table_bert_server_msg_val', None)
-            if table_bert_server_msg_val:
+            sketch_predictor_server_msg_val = getattr(self, 'sketch_predictor_server_msg_val', None)
+            if sketch_predictor_server_msg_val:
                 os.remove(str(Path(self.current_model_path).with_suffix('.sketch_predictor.bin')))
 
         self.current_model_path = model_save_path
@@ -275,9 +289,10 @@ class Learner(torch_mp.Process):
             if table_bert_server_msg_val:
                 table_bert_server_msg_val.value = model_path.encode()
 
+        if sketch_predictor_path:
             sketch_predictor_server_msg_val = getattr(self, 'sketch_predictor_server_msg_val', None)
             if sketch_predictor_server_msg_val:
-                sketch_predictor_server_msg_val.value = str(sketch_predictor_path).encode()
+                sketch_predictor_server_msg_val.value = sketch_predictor_path.encode()
 
     def register_actor(self, actor):
         actor.checkpoint_queue = self.checkpoint_queue
