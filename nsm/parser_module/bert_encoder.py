@@ -149,7 +149,7 @@ class BertEncoder(EncoderBase):
     def bert_encode(self, env_context: List[Dict]) -> Any:
         contexts, tables = get_table_bert_input_from_context(
             env_context, self.bert_model, is_training=self.training,
-            use_question_biased_sampled_values=self.config.get('use_question_biased_sampled_values', False)
+            content_snapshot_strategy=self.config.get('content_snapshot_strategy', None)
         )
 
         question_encoding, table_column_encoding, info = self.bert_model.encode(

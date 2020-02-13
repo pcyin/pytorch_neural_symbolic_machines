@@ -160,14 +160,14 @@ def get_table_bert_input_from_context(
     contexts = []
     tables = []
 
-    use_question_biased_sampled_values = kwargs.get('use_question_biased_sampled_values', True)
+    content_snapshot_strategy = kwargs.get('content_snapshot_strategy', None)
 
     for e in env_context:
         contexts.append(e['question_tokens'])
 
         if model_use_vertical_attention(bert_model):
             sample_row_num = bert_model.config.sample_row_num
-            if use_question_biased_sampled_values:
+            if content_snapshot_strategy == 'sampled_rows':
                 if 'sampled_rows' not in e:
                     sampled_rows = get_question_biased_sampled_rows(
                         e['question_tokens'], e['table'],
@@ -195,19 +195,27 @@ def get_table_bert_input_from_context(
             table = e['table'].with_rows(sampled_rows)
         else:
             table = e['table']
-            if use_question_biased_sampled_values:
-                if 'sampled_cells' not in e:
-                    sampled_cells = get_question_biased_sampled_cells(
-                        e['question_tokens'], e['table']
-                    )
-                    e['sampled_cells'] = sampled_cells
+            if content_snapshot_strategy:
+                if 'sampled_rows' not in e:
+                    if content_snapshot_strategy == 'sampled_rows':
+                        sampled_rows = get_question_biased_sampled_rows(
+                            e['question_tokens'], e['table'],
+                            num_rows=1
+                        )
+                        e['sampled_rows'] = sampled_rows
+                    elif content_snapshot_strategy == 'synthetic_row':
+                        sampled_cells = get_question_biased_sampled_cells(
+                            e['question_tokens'], e['table']
+                        )
+                        e['sampled_rows'] = [sampled_cells]
 
-                sampled_cells = e['sampled_cells']
+                sampled_row = e['sampled_rows'][0]
                 new_header = []
                 for idx, column in enumerate(e['table'].header):
+                    cell_value = sampled_row[idx] if isinstance(sampled_row, list) else sampled_row[column.name]
                     new_column = Column(
                         name=column.name, name_tokens=column.name_tokens, type=column.type,
-                        sample_value=sampled_cells[idx], sample_value_tokens=sampled_cells[idx]
+                        sample_value=cell_value, sample_value_tokens=cell_value
                     )
                     new_header.append(new_column)
 
