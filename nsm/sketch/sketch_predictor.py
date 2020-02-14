@@ -680,7 +680,7 @@ class SketchPredictorServer(multiprocessing.Process):
         config: Dict,
         device: str
     ):
-        super(SketchPredictorServer, self).__init__()
+        super(SketchPredictorServer, self).__init__(daemon=True)
         
         self.request_queue = multiprocessing.Queue()
         self.workers = dict()

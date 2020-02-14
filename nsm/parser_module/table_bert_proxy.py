@@ -89,7 +89,7 @@ class TableBertProxy(nn.Module):
 
 class TableBertServer(multiprocessing.Process):
     def __init__(self, config: Any, device: torch.device = 'cpu'):
-        super(TableBertServer, self).__init__()
+        super(TableBertServer, self).__init__(daemon=True)
 
         self.request_queue = multiprocessing.Queue()
         self.workers = dict()

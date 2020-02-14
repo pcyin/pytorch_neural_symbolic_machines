@@ -148,7 +148,8 @@ def get_columns_canonical(example, table, bert_tokenizer):
 
         if untyped_column_name in canonical_columns:
             column_entry = canonical_columns[untyped_column_name]
-            if column_entry.type == 'text' and type_string == 'real':
+
+            if sample_value is not None and column_entry.type == 'text' and type_string == 'real':
                 column_entry.type = 'real'
                 column_entry.sample_value_tokens = sample_value_tokens
 
@@ -214,7 +215,7 @@ def get_columns_concate(example, table, bert_tokenizer):
 def get_sample_value(raw_column_name, table, bert_tokenizer):
     sample_value = None
     for row_id, row in table['kg'].items():
-        if raw_column_name in row and isinstance(row[raw_column_name], list) and row[raw_column_name][0] is not None:
+        if raw_column_name in row and isinstance(row[raw_column_name], list) and len(str(row[raw_column_name][0])) > 0:
             sample_value = row[raw_column_name][0]
             break
     if sample_value is not None:
@@ -435,14 +436,23 @@ def distributed_train(args):
     if use_cuda:
         print(f'use cuda', file=sys.stderr)
         device_count = torch.cuda.device_count()
-        assert device_count >= 3
-        learner_devices = ['cuda:0', 'cuda:1']  # torch.device('cuda', 0)
-        evaluator_device = learner_devices[0]
-        # evaluator_device = 'cuda:1'  # torch.device('cuda', 1)
-        table_bert_server_device = 'cuda:2'
-        sketch_predictor_device = 'cuda:2'
 
-        for i in range(3, device_count):
+        if use_trainable_sketch_predictor:
+            assert device_count >= 3
+
+            learner_devices = ['cuda:0', 'cuda:1']
+            table_bert_server_device = 'cuda:2'
+            sketch_predictor_device = 'cuda:2'
+        else:
+            assert device_count >= 2
+
+            learner_devices = ['cuda:0', 'cuda:0']
+            table_bert_server_device = 'cuda:1'
+            sketch_predictor_device = 'cuda:1'
+
+        evaluator_device = learner_devices[0]
+
+        for i in range(2, device_count):
             actor_devices.append(f'cuda:{i}')
         else:
             actor_devices.append('cpu')
@@ -557,6 +567,12 @@ def distributed_train(args):
     for actor in actors:
         actor.terminate()
         actor.join()
+
+    if actor_use_table_bert_proxy:
+        table_bert_server.terminate()
+    if use_trainable_sketch_predictor:
+        sketch_predictor_server.terminate()
+
     evaluator.terminate()
     evaluator.join()
 
