@@ -23,7 +23,7 @@ import sys
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import List, Dict, Iterable
+from typing import List, Dict, Iterable, Any, Optional, Union
 import numpy as np
 import torch
 from pytorch_pretrained_bert import BertTokenizer
@@ -51,7 +51,11 @@ from nsm.program_cache import SharedProgramCache
 from table_bert.dataset import Column, Table
 
 
-def annotate_example_for_bert(example: Dict, table: Dict, bert_tokenizer: BertTokenizer, args: Dict):
+def annotate_example_for_bert(
+    example: Dict, table: Dict,
+    bert_tokenizer: BertTokenizer,
+    table_representation_method: Optional[str] = 'canonical'
+):
     e_id = example['id']
 
     # sub-tokenize the question
@@ -93,37 +97,49 @@ def annotate_example_for_bert(example: Dict, table: Dict, bert_tokenizer: BertTo
         entity['token_start'] = new_token_start
         entity['token_end'] = new_token_end
 
-    table_repr_method = args.get('table_representation', 'concate')
-    if table_repr_method == 'concate':
+    if table_representation_method == 'concate':
         columns, column_info = get_columns_concate(example, table, bert_tokenizer)
-    elif table_repr_method == 'canonical':
-        columns, column_info = get_columns_canonical(example, table, bert_tokenizer)
+    elif table_representation_method == 'canonical':
+        columns, column_info = get_columns_canonical(example, table)
     else:
         raise RuntimeError('Unknown table representation')
 
     # gather table data
+    for column in columns:
+        column.name_tokens = bert_tokenizer.tokenize(str(column.name))
+        column.sample_value_tokens = bert_tokenizer.tokenize(str(column.sample_value))
+
     rows = [table['kg'][row_id] for row_id in sorted(table['kg'])]
     valid_rows = []
+    untokenized_rows = []
     for row in rows:
         valid_row = {}
+        untokenized_row = {}
         for col in columns:
             cell_val = row.get(col.raw_name, [])
             if cell_val:
                 cell_val = str(cell_val[0])
+                untokenized_row[col.name] = cell_val
                 cell_tokens = bert_tokenizer.tokenize(cell_val)
             else:
                 cell_tokens = []
+                untokenized_row[col.name] = ''
+
             valid_row[col.name] = cell_tokens
 
         valid_rows.append(valid_row)
+        untokenized_rows.append(untokenized_row)
 
     table = Table(id=example['context'], header=columns, data=valid_rows, column_info=column_info)
+    untokenized_table = Table(id=example['context'], header=columns, data=untokenized_rows)
+
     example['table'] = table
+    example['untokenized_table'] = untokenized_table
 
     return example
 
 
-def get_columns_canonical(example, table, bert_tokenizer):
+def get_columns_canonical(example, table):
     # parse the table
     canonical_columns = OrderedDict()
     canonical_column_ids = OrderedDict()
@@ -144,23 +160,21 @@ def get_columns_canonical(example, table, bert_tokenizer):
         else:
             type_string = 'text'
 
-        sample_value, sample_value_tokens = get_sample_value(raw_column_name, table, bert_tokenizer)
+        sample_value = get_sample_value(raw_column_name, table)
 
         if untyped_column_name in canonical_columns:
             column_entry = canonical_columns[untyped_column_name]
 
             if sample_value is not None and column_entry.type == 'text' and type_string == 'real':
                 column_entry.type = 'real'
-                column_entry.sample_value_tokens = sample_value_tokens
+                column_entry.sample_value = sample_value
 
             raw_column_canonical_ids.append(canonical_column_ids[untyped_column_name])
         else:
-            column = Column(name=untyped_column_name,
+            column = Column(name=column_name,
                             raw_name=raw_column_name,
                             type=type_string,
-                            sample_value=sample_value,
-                            name_tokens=bert_tokenizer.tokenize(column_name),
-                            sample_value_tokens=sample_value_tokens)
+                            sample_value=sample_value)
 
             canonical_columns[untyped_column_name] = column
             canonical_column_ids[untyped_column_name] = col_id
@@ -212,23 +226,23 @@ def get_columns_concate(example, table, bert_tokenizer):
     return columns, {}
 
 
-def get_sample_value(raw_column_name, table, bert_tokenizer):
+def get_sample_value(raw_column_name, table):
     sample_value = None
     for row_id, row in table['kg'].items():
         if raw_column_name in row and isinstance(row[raw_column_name], list) and len(str(row[raw_column_name][0])) > 0:
             sample_value = row[raw_column_name][0]
             break
-    if sample_value is not None:
-        sample_value_tokens = bert_tokenizer.tokenize(str(sample_value))
-    else:
-        sample_value_tokens = []
-    return sample_value, sample_value_tokens
+
+    return sample_value
 
 
-def load_environments(example_files: List[str], table_file: str, vocab_file: str, en_vocab_file: str,
-                      embedding_file: str, config: Dict,
-                      example_ids: Iterable = None,
-                      column_annotation_file: str = None, bert_tokenizer: BertTokenizer = None):
+def load_environments(
+    example_files: List[str],
+    table_file: str,
+    table_representation_method: str = 'canonical',
+    example_ids: Iterable = None,
+    bert_tokenizer: BertTokenizer = None
+):
     dataset = []
     if example_ids is not None:
         example_ids = set(example_ids)
@@ -248,33 +262,79 @@ def load_environments(example_files: List[str], table_file: str, vocab_file: str
     table_dict = {table['name']: table for table in tables}
     print('{} tables.'.format(len(table_dict)))
 
-    # Load pretrained embeddings.
-    embedding_model = EmbeddingModel(vocab_file, embedding_file)
-
-    with open(en_vocab_file, 'r') as f:
-        vocab = json.load(f)
-
-    en_vocab = Vocab([])
-    en_vocab.load_vocab(vocab)
-    print('{} unique tokens in encoder vocab'.format(
-        len(en_vocab.vocab)))
-    print('{} examples in the dataset'.format(len(dataset)))
-
     environments = create_environments(
-        table_dict, dataset, en_vocab, embedding_model,
-        executor_type='wtq', bert_tokenizer=bert_tokenizer, config=config)
+        table_dict, dataset,
+        table_representation_method=table_representation_method,
+        executor_type='wtq',
+        bert_tokenizer=bert_tokenizer,
+    )
     print('{} environments in total'.format(len(environments)))
 
     return environments
 
 
-def create_environments(table_dict, dataset, en_vocab, embedding_model, executor_type,
-                        max_n_mem=60, max_n_exp=3,
-                        pretrained_embedding_size=300,
-                        config=None,
-                        bert_tokenizer=None):
+def load_indexed_environments(
+    file_patterns: Union[Iterable[Any], Path],
+    table_file: Path,
+    table_representation_method: Optional[str] = 'canonical',
+) -> Dict[str, QAProgrammingEnv]:
+    if isinstance(file_patterns, Path):
+        file_patterns = [file_patterns]
+
+    envs = load_environments(
+        [str(f) for f in file_patterns],
+        table_file=str(table_file),
+        table_representation_method=table_representation_method,
+        bert_tokenizer=BertTokenizer.from_pretrained('bert-base-uncased')
+    )
+
+    for env in envs:
+        env.use_cache = False
+        env.punish_extra_work = False
+
+    env_dict = {
+        env.name: env
+        for env in envs
+    }
+
+    return env_dict
+
+
+def create_environments(
+    table_dict, dataset,
+    table_representation_method,
+    executor_type,
+    max_n_mem=60, max_n_exp=3,
+    bert_tokenizer=None
+) -> List[QAProgrammingEnv]:
     all_envs = []
 
+    for i, example in enumerate(dataset):
+        if i % 100 == 0:
+            print('creating environment #{}'.format(i))
+
+        kg_info = table_dict[example['context']]
+
+        env = create_environment(
+            example, kg_info,
+            table_representation_method,
+            executor_type,
+            max_n_mem, max_n_exp,
+            bert_tokenizer
+        )
+
+        all_envs.append(env)
+
+    return all_envs
+
+
+def create_environment(
+        example_dict: Dict, table_kg: Dict,
+        table_representation_method: str,
+        executor_type: str = 'wtq',
+        max_n_mem: int = 60, max_n_exp: int = 3,
+        bert_tokenizer: BertTokenizer = None,
+) -> QAProgrammingEnv:
     if executor_type == 'wtq':
         score_fn = utils.wtq_score
         process_answer_fn = lambda x: x
@@ -286,50 +346,68 @@ def create_environments(table_dict, dataset, en_vocab, embedding_model, executor
     else:
         raise ValueError('Unknown executor {}'.format(executor_type))
 
-    for i, example in enumerate(dataset):
-        if i % 100 == 0:
-            print('creating environment #{}'.format(i))
+    executor = executor_fn(table_kg)
+    api = executor.get_api()
+    type_hierarchy = api['type_hierarchy']
+    func_dict = api['func_dict']
+    constant_dict = api['constant_dict']
 
-        kg_info = table_dict[example['context']]
-        executor = executor_fn(kg_info)
-        api = executor.get_api()
-        type_hierarchy = api['type_hierarchy']
-        func_dict = api['func_dict']
-        constant_dict = api['constant_dict']
+    interpreter = LispInterpreter(
+        type_hierarchy=type_hierarchy,
+        max_mem=max_n_mem,
+        max_n_exp=max_n_exp,
+        assisted=True
+    )
 
-        interpreter = LispInterpreter(
-            type_hierarchy=type_hierarchy,
-            max_mem=max_n_mem,
-            max_n_exp=max_n_exp,
-            assisted=True)
+    for v in func_dict.values():
+        interpreter.add_function(**v)
 
-        for v in func_dict.values():
-            interpreter.add_function(**v)
+    interpreter.add_constant(
+        value=table_kg['row_ents'],
+        type='entity_list',
+        name='all_rows')
 
-        interpreter.add_constant(
-            value=kg_info['row_ents'],
-            type='entity_list',
-            name='all_rows')
+    if bert_tokenizer:
+        example = annotate_example_for_bert(
+            example_dict, table_kg, bert_tokenizer,
+            table_representation_method=table_representation_method
+        )
 
-        de_vocab = interpreter.get_vocab()
+    env = QAProgrammingEnv(
+        question_annotation=example,
+        kg=table_kg,
+        answer=process_answer_fn(example['answer']),
+        constants=constant_dict.values(),
+        interpreter=interpreter,
+        score_fn=score_fn,
+        name=example['id']
+    )
 
-        constant_value_embedding_fn = lambda x: utils.get_embedding_for_constant(x, embedding_model,
-                                                                                 embedding_size=pretrained_embedding_size)
+    return env
 
-        if bert_tokenizer:
-            example = annotate_example_for_bert(example, kg_info, bert_tokenizer, args=config)
 
-        env = QAProgrammingEnv(en_vocab, de_vocab,
-                               question_annotation=example,
-                               answer=process_answer_fn(example['answer']),
-                               constants=constant_dict.values(),
-                               interpreter=interpreter,
-                               constant_value_embedding_fn=constant_value_embedding_fn,
-                               score_fn=score_fn,
-                               name=example['id'])
-        all_envs.append(env)
+def load_program_cache(cache_dir: Path) -> Dict:
+    assert cache_dir.exists(), f'{str(cache_dir)} does not exsit!'
 
-    return all_envs
+    program_cache: Dict = json.load(cache_dir.open())
+
+    program_cache = {
+        question_id: [
+            hyp
+            for hyp in hyp_list
+            if hyp['prob'] is not None
+        ]
+        for question_id, hyp_list in program_cache.items()
+        if (
+            len([
+                    hyp
+                    for hyp in hyp_list
+                    if hyp['prob'] is not None
+            ]) > 0
+        )
+    }
+
+    return program_cache
 
 
 def to_human_readable_program(program, env):

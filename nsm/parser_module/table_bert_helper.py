@@ -161,6 +161,8 @@ def get_table_bert_input_from_context(
     tables = []
 
     content_snapshot_strategy = kwargs.get('content_snapshot_strategy', None)
+    if content_snapshot_strategy:
+        assert content_snapshot_strategy in ('sampled_rows', 'synthetic_row')
 
     for e in env_context:
         contexts.append(e['question_tokens'])

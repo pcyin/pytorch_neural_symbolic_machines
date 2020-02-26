@@ -235,10 +235,12 @@ class QAProgrammingEnv(Environment):
     learn to write programs based on question.
     """
 
-    def __init__(self, en_vocab, de_vocab,
-                 question_annotation, answer,
-                 constant_value_embedding_fn,
-                 score_fn, interpreter, constants=None,
+    def __init__(self,
+                 question_annotation,
+                 kg,
+                 answer,
+                 score_fn, interpreter,
+                 de_vocab=None, constants=None,
                  punish_extra_work=True,
                  init_interp=True, trigger_words_dict=None,
                  max_cache_size=1e4,
@@ -248,22 +250,20 @@ class QAProgrammingEnv(Environment):
                  name='qa_programming'):
 
         self.name = name
-        self.en_vocab = en_vocab
-        self.de_vocab = de_vocab
+        self.de_vocab = de_vocab or interpreter.get_vocab()
         self.end_action = self.de_vocab.end_id
         self.score_fn = score_fn
         self.interpreter = interpreter
         self.answer = answer
         self.question_annotation = question_annotation
-        self.constant_value_embedding_fn = constant_value_embedding_fn
+        self.kg = kg
         self.constants = constants
         self.punish_extra_work = punish_extra_work
         self.error = False
         self.trigger_words_dict = trigger_words_dict
         tokens = question_annotation['tokens']
 
-        en_inputs = en_vocab.lookup(tokens)
-        self.n_builtin = len(de_vocab.vocab) - interpreter.max_mem
+        self.n_builtin = len(self.de_vocab.vocab) - interpreter.max_mem
         self.n_mem = interpreter.max_mem
         self.n_exp = interpreter.max_n_exp
         max_n_constants = self.n_mem - self.n_exp
@@ -299,19 +299,12 @@ class QAProgrammingEnv(Environment):
                 print('Not enough memory slots for example {}, which has {} constants.'.format(
                     self.name, len(constant_values)))
 
-            # Use encoder output at start and end (inclusive) step
-            # to create span embedding.
-            constant_value_embeddings = [
-                constant_value_embedding_fn(value) for value in constant_values]
-
-            constant_value_embeddings = constant_value_embeddings[:max_n_constants]
-
-            self.context = dict(question_word_ids=en_inputs,
-                                constant_spans=constant_spans,
-                                constant_value_embeddings=constant_value_embeddings,
-                                question_features=question_annotation['features'],
-                                question_tokens=tokens,
-                                table=question_annotation['table'] if 'table' in question_annotation else None)
+            self.context = dict(
+                constant_spans=constant_spans,
+                question_features=question_annotation['features'],
+                question_tokens=tokens,
+                table=question_annotation['table'] if 'table' in question_annotation else None
+            )
 
         # Create output features.
         if id_feature_dict:
@@ -320,7 +313,7 @@ class QAProgrammingEnv(Environment):
             prop_features = question_annotation['prop_features']
             feat_num = len(list(prop_features.values())[0])
             self.id_feature_dict = {}
-            for name, id in de_vocab.vocab.items():
+            for name, id in self.de_vocab.vocab.items():
                 self.id_feature_dict[id] = [0] * feat_num
                 if name in self.interpreter.namespace:
                     val = self.interpreter.namespace[name]['value']
@@ -487,11 +480,13 @@ class QAProgrammingEnv(Environment):
     def clone(self):
         new_interpreter = self.interpreter.clone()
         new = QAProgrammingEnv(
-            self.en_vocab, self.de_vocab, score_fn=self.score_fn,
             question_annotation=self.question_annotation,
-            constant_value_embedding_fn=self.constant_value_embedding_fn,
+            kg=self.kg,
+            answer=self.answer,
+            score_fn=self.score_fn,
+            interpreter=new_interpreter,
+            de_vocab=self.de_vocab,
             constants=self.constants,
-            answer=self.answer, interpreter=new_interpreter,
             init_interp=False,
             context=self.context,
             id_feature_dict=self.id_feature_dict,

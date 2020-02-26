@@ -135,7 +135,7 @@ class PGAgent(nn.Module):
 
             # max_z, pos = torch.max(masked_logits, dim=-1, keepdim=True)
             # z = masked_logits - max_z
-            # exp_z = torch.exp(z)
+            # exp_z = torch.util(z)
             # (batch_size, max_action_len)
             # sum_exp_z = torch.sum(exp_z, dim=-1, keepdim=True)
 

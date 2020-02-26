@@ -117,11 +117,8 @@ class Evaluator(torch_mp.Process):
         from table.experiments import load_environments
         envs = load_environments([self.eval_file],
                                  table_file=self.config['table_file'],
-                                 vocab_file=self.config['vocab_file'],
-                                 en_vocab_file=self.config['en_vocab_file'],
-                                 embedding_file=self.config['embedding_file'],
-                                 bert_tokenizer=self.agent.encoder.bert_model.tokenizer,
-                                 config=self.config)
+                                 table_representation_method=self.config['table_representation'],
+                                 bert_tokenizer=self.agent.encoder.bert_model.tokenizer)
         for env in envs:
             env.use_cache = False
             env.punish_extra_work = False

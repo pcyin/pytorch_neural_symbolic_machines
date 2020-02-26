@@ -86,14 +86,14 @@ class LispInterpreter(object):
                 return_type=return_type, args=args)
 
     def autocomplete(self, exp, tokens, token_vals, namespace):
-        # func = exp[0]
-        # exp = [x['value'] for x in exp]
+        # func = util[0]
+        # util = [x['value'] for x in util]
         # token_vals = [x['value'] for x in token_vals]
         # if func['type'] == 'global_primitive_function':
         #   return func['autocomplete'](
-        #     exp, tokens, token_vals, namespace=namespace)
+        #     util, tokens, token_vals, namespace=namespace)
         # else:
-        #   return func['autocomplete'](exp, tokens, token_vals)
+        #   return func['autocomplete'](util, tokens, token_vals)
         function = exp[0]
 
         return function['autocomplete'](exp, tokens, token_vals)
@@ -244,7 +244,7 @@ class LispInterpreter(object):
             namespace = self.namespace
         if is_symbol(x):  # variable reference
             return namespace.get_object(x).copy()
-        elif x[0] == 'define':  # (define name exp)
+        elif x[0] == 'define':  # (define name util)
             (_, name, exp) = x
             obj = self._eval(exp, namespace)
             namespace[name] = obj
@@ -367,6 +367,12 @@ class Namespace(OrderedDict):
         new.last_var = self.last_var
         return new
 
+    def clone_and_reset(self):
+        copy = self.clone()
+        copy.reset_variables()
+
+        return copy
+
     def generate_new_name(self):
         """Create and return a new variable."""
         name = 'v{}'.format(self.n_var)
@@ -400,7 +406,8 @@ class Namespace(OrderedDict):
         return self.keys()
 
     def reset_variables(self):
-        for k in self.keys():
+        keys = list(self.keys())
+        for k in keys:
             if re.match(r'v\d+', k):
                 del self[k]
         self.n_var = 0
