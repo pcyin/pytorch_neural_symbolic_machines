@@ -585,9 +585,9 @@ class PGAgent(nn.Module):
         if config['parser'] == 'sketch':
             from .sketch_guided_agent import SketchGuidedAgent
             model_cls = SketchGuidedAgent
-        elif config['parser'] == 'content_based':
-            from .content_based_agent import ContentBasedAgent
-            model_cls = ContentBasedAgent
+        # elif config['parser'] == 'content_based':
+        #     from .content_based_agent import ContentBasedAgent
+        #     model_cls = ContentBasedAgent
 
         model = model_cls.build(config)
         incompatible_keys = model.load_state_dict(params['state_dict'], strict=False)
