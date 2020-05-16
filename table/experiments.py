@@ -702,13 +702,13 @@ def test(args):
 
     test_file = args['--test-file']
     print(f'loading test file [{test_file}]', file=sys.stderr)
-    test_envs = load_environments([test_file],
-                                  table_file=config['table_file'],
-                                  vocab_file=config['vocab_file'],
-                                  en_vocab_file=config['en_vocab_file'],
-                                  embedding_file=config['embedding_file'],
-                                  bert_tokenizer=agent.encoder.bert_model.tokenizer,
-                                  config=config)
+    test_envs = load_environments(
+        [test_file],
+        table_file=config['table_file'],
+        table_representation_method=config['table_representation'],
+        bert_tokenizer=agent.encoder.bert_model.tokenizer
+    )
+
     for env in test_envs:
         env.use_cache = False
         env.punish_extra_work = False

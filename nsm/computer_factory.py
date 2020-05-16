@@ -244,7 +244,7 @@ class LispInterpreter(object):
             namespace = self.namespace
         if is_symbol(x):  # variable reference
             return namespace.get_object(x).copy()
-        elif x[0] == 'define':  # (define name util)
+        elif x[0] == 'define':  # (define name exp)
             (_, name, exp) = x
             obj = self._eval(exp, namespace)
             namespace[name] = obj
