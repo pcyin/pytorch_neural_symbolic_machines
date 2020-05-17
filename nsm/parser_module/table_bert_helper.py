@@ -17,9 +17,9 @@ from nsm.parser_module.sequence_util import StringMatchUtil
 def get_table_bert_model(config: Dict, use_proxy=False, master=None):
     tb_path = config.get('table_bert_model_or_config')
     if tb_path is None or tb_path == '':
-        tb_path = config.get('table_bert_model')
-    if tb_path is None or tb_path == '':
         tb_path = config.get('table_bert_config_file')
+    if tb_path is None or tb_path == '':
+        tb_path = config.get('table_bert_model')
 
     tb_path = Path(tb_path)
     assert tb_path.exists()
@@ -53,8 +53,8 @@ def get_table_bert_model(config: Dict, use_proxy=False, master=None):
                 **table_bert_extra_config
             )
 
-        # if type(table_bert_model) == VanillaTableBert:
-        #     table_bert_model.config.column_representation = config.get('column_representation', 'mean_pool')
+        if type(table_bert_model) == VanillaTableBert:
+            table_bert_model.config.column_representation = config.get('column_representation', 'mean_pool_column_name')
 
         print('Table Bert Config', file=sys.stderr)
         print(json.dumps(vars(table_bert_model.config), indent=2), file=sys.stderr)

@@ -94,9 +94,10 @@ class BertEncoder(EncoderBase):
     @classmethod
     def build(cls, config, table_bert_model=None, master=None):
         if table_bert_model is None:
+            use_proxy = isinstance(master, str) and master.lower().startswith('actor') and config.get('actor_use_table_bert_proxy', False)
             table_bert_model = get_table_bert_model(
                 config,
-                use_proxy=master.lower().startswith('actor') and config.get('actor_use_table_bert_proxy', False),
+                use_proxy=use_proxy,
                 master=master
             )
 

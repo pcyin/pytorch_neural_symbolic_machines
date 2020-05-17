@@ -658,8 +658,13 @@ def distributed_train(args):
 def test(args):
     use_gpu = args['--cuda']
     model_path = args['--model']
+
+    extra_config = json.loads(args['--extra-config'])
+    if len(extra_config) > 0:
+        print(f'load extra config [{extra_config}]', file=sys.stderr)
+
     print(f'loading model [{model_path}] for evaluation', file=sys.stderr)
-    agent = PGAgent.load(model_path, gpu_id=0 if use_gpu else -1).eval()
+    agent = PGAgent.load(model_path, gpu_id=0 if use_gpu else -1, **extra_config).eval()
     config = agent.config
 
     test_file = args['--test-file']
