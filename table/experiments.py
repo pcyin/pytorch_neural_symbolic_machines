@@ -54,18 +54,14 @@ from table_bert.dataset import Column, Table
 def annotate_example_for_bert(
     example: Dict, table: Dict,
     bert_tokenizer: BertTokenizer,
+    table_representation_method: Optional[str] = 'canonical'
 ):
-    bert_tokenize_example(example, bert_tokenizer)
-    bert_tokenize_table(example['table'], bert_tokenizer)
+    e_id = example['id']
 
-    return example
-
-
-def bert_tokenize_example(example: Dict, bert_tokenizer: BertTokenizer) -> Dict:
     # sub-tokenize the question
     question_tokens = example['tokens']
     example['original_tokens'] = question_tokens
-    token_position_map = OrderedDict()  # map of token index before and after sub-tokenization
+    token_position_map = OrderedDict()   # map of token index before and after sub-tokenization
 
     question_feature = example['features']
 
@@ -101,76 +97,46 @@ def bert_tokenize_example(example: Dict, bert_tokenizer: BertTokenizer) -> Dict:
         entity['token_start'] = new_token_start
         entity['token_end'] = new_token_end
 
-    return example
+    if table_representation_method == 'concate':
+        columns, column_info = get_columns_concate(example, table, bert_tokenizer)
+    elif table_representation_method == 'canonical':
+        columns, column_info = get_columns_canonical(example, table)
+    else:
+        raise RuntimeError('Unknown table representation')
 
-
-def bert_tokenize_table(table: Table, bert_tokenizer: BertTokenizer) -> Table:
-    for column in table.header:
+    # gather table data
+    for column in columns:
         column.name_tokens = bert_tokenizer.tokenize(str(column.name))
         column.sample_value_tokens = bert_tokenizer.tokenize(str(column.sample_value))
 
-    tokenized_rows = []
-    for row in table.data:
-        tokenized_row = {
-            column: [] if cell is None else bert_tokenizer.tokenize(cell)
-            for column, cell
-            in row.items()
-        }
+    rows = [table['kg'][row_id] for row_id in sorted(table['kg'])]
+    valid_rows = []
+    untokenized_rows = []
+    for row in rows:
+        valid_row = {}
+        untokenized_row = {}
+        for col in columns:
+            cell_val = row.get(col.raw_name, [])
+            if cell_val:
+                cell_val = str(cell_val[0])
+                untokenized_row[col.name] = cell_val
+                cell_tokens = bert_tokenizer.tokenize(cell_val)
+            else:
+                cell_tokens = []
+                untokenized_row[col.name] = ''
 
-        tokenized_rows.append(tokenized_row)
+            valid_row[col.name] = cell_tokens
 
-    tokenized_table = table.with_rows(tokenized_rows)
+        valid_rows.append(valid_row)
+        untokenized_rows.append(untokenized_row)
 
-    return tokenized_table
+    table = Table(id=example['context'], header=columns, data=valid_rows, column_info=column_info)
+    untokenized_table = Table(id=example['context'], header=columns, data=untokenized_rows)
 
+    example['table'] = table
+    example['untokenized_table'] = untokenized_table
 
-def preprocess_table(example: Dict, table: Dict, bert_tokenizer: Optional[BertTokenizer] = None):
-    # first, build a canonical table
-    # keep the mapping between the canonical and original strongly-typed table
-
-    canonical_columns, column_info = get_columns_canonical(example, table)
-    raw_columns = column_info['raw_columns']
-
-    original_rows = [table['kg'][row_id] for row_id in sorted(table['kg'])]
-
-    def _get_cell_val(_column_name, _row_data):
-        _cell_val = _row_data.get(_column_name, [])
-        if _cell_val:
-            _cell_val = _cell_val[0]
-        else:
-            _cell_val = None
-
-        return _cell_val
-
-    canonical_rows = []
-    raw_rows = []
-    for row in original_rows:
-        row_data = {}
-        raw_row_data = {}
-        for column in canonical_columns:
-            cell_val = _get_cell_val(column.raw_name, row)
-            if bert_tokenizer:
-                cell_val = [] if cell_val is None else bert_tokenizer.tokenize(cell_val)
-
-            row_data[column.name] = cell_val
-
-        for column in raw_columns:
-            cell_val = _get_cell_val(column.name, row)
-            if bert_tokenizer:
-                cell_val = [] if cell_val is None else bert_tokenizer.tokenize(cell_val)
-
-            raw_row_data[column.name] = cell_val
-
-        canonical_rows.append(row_data)
-        raw_rows.append(raw_row_data)
-
-    table = Table(id=example['context'], header=canonical_columns, data=canonical_rows, column_info=column_info)
-    raw_table = Table(id=example['context'], header=raw_columns, data=raw_rows)
-
-    return {
-        'table': table,
-        'raw_table': raw_table
-    }
+    return example
 
 
 def get_columns_canonical(example, table):
@@ -310,7 +276,6 @@ def load_environments(
 def load_indexed_environments(
     file_patterns: Union[Iterable[Any], Path],
     table_file: Path,
-    bert_tokenizer: Optional[BertTokenizer] = None,
     table_representation_method: Optional[str] = 'canonical',
 ) -> Dict[str, QAProgrammingEnv]:
     if isinstance(file_patterns, Path):
@@ -320,7 +285,7 @@ def load_indexed_environments(
         [str(f) for f in file_patterns],
         table_file=str(table_file),
         table_representation_method=table_representation_method,
-        bert_tokenizer=bert_tokenizer
+        bert_tokenizer=BertTokenizer.from_pretrained('bert-base-uncased')
     )
 
     for env in envs:
@@ -402,23 +367,20 @@ def create_environment(
         type='entity_list',
         name='all_rows')
 
-    keyed_tables = preprocess_table(example_dict, table_kg)
-    example_dict.update(keyed_tables)
-
     if bert_tokenizer:
-        example_dict = annotate_example_for_bert(
-            example_dict, table_kg,
-            bert_tokenizer,
+        example = annotate_example_for_bert(
+            example_dict, table_kg, bert_tokenizer,
+            table_representation_method=table_representation_method
         )
 
     env = QAProgrammingEnv(
-        question_annotation=example_dict,
+        question_annotation=example,
         kg=table_kg,
-        answer=process_answer_fn(example_dict['answer']),
+        answer=process_answer_fn(example['answer']),
         constants=constant_dict.values(),
         interpreter=interpreter,
         score_fn=score_fn,
-        name=example_dict['id']
+        name=example['id']
     )
 
     return env
