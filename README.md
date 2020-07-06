@@ -5,10 +5,8 @@ This repository is a Pytorch implementation of Google's [neural symbolic machine
 **Key Difference with the Official TensorFlow Implementation** This implementation 
 differs from the official tensorflow implementation in the following ways:
 
-* The original model uses GloVe word embeddings and bi-directional LSTM networks as the encoder of 
-utterances and table schemas (table columns). This implementation uses **pre-trained BERT/[TaBERT models](http://fburl.com/TaBERT)** using the table representation strategy proposed in Yin et al. (2020). It significantly outperforms the LSTM-based model, registering **~49.4%** denotation-level exact-match accuracies on the test set (the original accuracy is 43.8).
-* We revised the [data pre-processing script](https://github.com/crazydonkey200/neural-symbolic-machines/blob/master/table/wtq/preprocess.py), and 
-re-processed the WikiTableQuestions dataset. We also turned off the `--anonymize_datetime_and_number_entities` option when preprocessing the dataset, which gave better performance.
+* The original model uses GloVe word embeddings and bi-directional LSTM networks as the encoder of utterances and table schemas (table columns). This implementation uses **pre-trained BERT/[TaBERT models](http://fburl.com/TaBERT)** using the table representation strategy proposed in Yin et al. (2020). It significantly outperforms the LSTM-based model, registering **~49.4%** denotation-level exact-match accuracies on the test set (the original accuracy is 43.8).
+* We revised the [data pre-processing script](https://github.com/crazydonkey200/neural-symbolic-machines/blob/master/table/wtq/preprocess.py), and re-processed the WikiTableQuestions dataset. We also turned off the `--anonymize_datetime_and_number_entities` option when preprocessing the dataset, which gave better performance.
 * Besides performance improvement, we also optimized the original codebase for general efficiency improvement. The training speed is ~2 times faster than the original tensorflow implemenation when using an LSTM encoder.
 
 ## Setup
@@ -20,6 +18,15 @@ re-processed the WikiTableQuestions dataset. We also turned off the `--anonymize
 ```bash
 conda env update --name tabert --file data/env.yml
 ```
+
+**Download Dependencies** We provide a pre-processed version of the `WikiTableQuestions` dataset, which could be downloaded from:
+
+```
+wget http://www.cs.cmu.edu/~pengchey/pytorch_nsm.zip
+unzip pytorch_nsm.zip    # extract pre-processed dataset under the `data` directory.
+```
+
+As discussed above, the key difference of our version of the pre-processed data and the original ones used in Liang et al. (2018) is that we did not anonymize named entities in questions.  
 
 ## Usage
 
@@ -71,6 +78,14 @@ We are grateful to [Chen Liang](https://crazydonkey200.github.io/), author of th
 Please consider citing the following papers if you are using our codebase.
 
 ```
+@inproceedings{pasupat-liang-2015-compositional,
+    title = "Compositional Semantic Parsing on Semi-Structured Tables",
+    author = "Pasupat, Panupong and Liang, Percy",
+    booktitle = "Proceedings of the 53rd Annual Meeting of the Association for Computational Linguistics and the 7th International Joint Conference on Natural Language Processing (Volume 1: Long Papers)",
+    year = "2015",
+    pages = "1470--1480",
+}
+
 @incollection{NIPS2018_8204,
 title = {Memory Augmented Policy Optimization for Program Synthesis and Semantic Parsing},
 author = {Liang, Chen and Norouzi, Mohammad and Berant, Jonathan and Le, Quoc V and Lao, Ni},
