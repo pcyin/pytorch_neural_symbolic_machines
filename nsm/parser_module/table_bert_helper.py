@@ -1,8 +1,9 @@
+from typing import Dict, List, Tuple, Any
+import copy
 import sys
 import json
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
 
 from table_bert.config import TableBertConfig, BERT_CONFIGS
 from table_bert.table_bert import TableBertModel
@@ -15,6 +16,36 @@ from nsm.parser_module.sequence_util import StringMatchUtil
 
 
 def get_table_bert_model(config: Dict, use_proxy=False, master=None):
+    model_name_or_path = config.get('table_bert_model_or_config')
+    if model_name_or_path in {None, ''}:
+        model_name_or_path = config.get('table_bert_config_file')
+    if model_name_or_path in {None, ''}:
+        model_name_or_path = config.get('table_bert_model')
+
+    table_bert_extra_config = config.get('table_bert_extra_config', dict())
+
+    print(f'Loading table BERT model {model_name_or_path}', file=sys.stderr)
+    model = TableBertModel.from_pretrained(
+        model_name_or_path,
+        **table_bert_extra_config
+    )
+
+    if type(model) == VanillaTableBert:
+        model.config.column_representation = config.get('column_representation', 'mean_pool_column_name')
+
+    if use_proxy:
+        from nsm.parser_module.table_bert_proxy import TableBertProxy
+        tb_config = copy.deepcopy(model.config)
+        del model
+        model = TableBertProxy(actor_id=master, table_bert_config=tb_config)
+
+    print('Table Bert Config', file=sys.stderr)
+    print(json.dumps(vars(model.config), indent=2), file=sys.stderr)
+
+    return model
+
+
+def get_table_bert_model_deprecated(config: Dict, use_proxy=False, master=None):
     tb_path = config.get('table_bert_model_or_config')
     if tb_path is None or tb_path == '':
         tb_path = config.get('table_bert_config_file')

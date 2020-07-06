@@ -21,7 +21,7 @@ class TableBertProxy(nn.Module):
         self.request_queue = None
         self.result_queue = None
 
-        self.actor_od = actor_id
+        self.actor_id = actor_id
         self.worker_id = actor_id
 
         self.device = torch.device('cpu')
