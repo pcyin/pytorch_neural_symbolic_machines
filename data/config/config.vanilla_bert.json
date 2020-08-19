@@ -15,7 +15,7 @@
     "shard_start_id": 0,
     "shard_end_id": 90,
     "saved_program_file": "data/wikitable/wtq_preprocess_0805_no_anonymize_ent/saved_programs.json",
-    "dev_file": "data/wikitable/wtq_preprocess_0805_no_anonymize_ent/data_split_1/train_split_shard_90-0.jsonl",
+    "dev_file": "data/wikitable/wtq_preprocess_0805_no_anonymize_ent/data_split_1/dev_split.jsonl",
     "use_consistency_model": false,
     "use_sketch_exploration": false,
     "sketch_explore_force_coverage": false,
@@ -46,12 +46,12 @@
     "value_embedding_size": 200,
     "n_de_output_features": 1,
     "load_saved_programs": true,
-    "n_explore_samples": 2,
+    "n_explore_samples": 10,
     "use_cache": true,
     "n_replay_samples": 1,
     "n_policy_samples": 1,
     "use_top_k_replay_samples": false,
-    "actor_num": 16,
+    "actor_num": 12,
     "batch_size": 10,
     "beam_size": 10,
     "max_train_step": 20000,
@@ -63,5 +63,5 @@
     "attention_type": "dot_prod",
     "use_finetune": false,
     "replay_sample_with_replacement": true,
-    "save_program_cache_niter": 5
+    "save_program_cache_niter": 1000
 }
